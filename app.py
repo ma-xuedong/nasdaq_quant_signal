@@ -334,8 +334,8 @@ def display_tech_stocks(result: dict) -> None:
             
             df = daily_data[symbol]
             if len(df) > 1:
-                latest = df.iloc[0]["Close"]
-                prev = df.iloc[1]["Close"]
+                latest = df.iloc[-1]["close"]
+                prev = df.iloc[-2]["close"]
                 change_pct = (latest - prev) / prev * 100
             else:
                 change_pct = 0
@@ -387,12 +387,13 @@ def display_relative_strength(result: dict) -> None:
     
     try:
         snapshot = result["indicator_snapshot"]
+        relative_strength = snapshot.get("relative_strength", {})
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("**QQQ 相对 SPY 强弱**")
-            qqq_spy_ratio = snapshot.get("qqq_spy_ratio", 0)
+            qqq_spy_ratio = relative_strength.get("qqq_vs_spy", 0)
             if qqq_spy_ratio > 0.01:
                 st.success(f"🟢 纳指相对强势 ({qqq_spy_ratio:.4f})")
                 st.caption("说明纳指科技方向强于大盘")
@@ -404,7 +405,7 @@ def display_relative_strength(result: dict) -> None:
         
         with col2:
             st.markdown("**QQQE 相对 QQQ 强弱**")
-            qqqe_qqq_ratio = snapshot.get("qqqe_qqq_ratio", 0)
+            qqqe_qqq_ratio = relative_strength.get("qqqe_vs_qqq", 0)
             if qqqe_qqq_ratio > -0.02:
                 st.success(f"🟢 广度健康 ({qqqe_qqq_ratio:.4f})")
                 st.caption("说明上涨更健康，不完全依赖少数权重股")
@@ -515,7 +516,9 @@ def display_qqq_chart(result: dict) -> None:
             st.info("⚠️ QQQ 数据不可用，无法绘制图表")
             return
         
-        df = daily_data["QQQ"].sort_index()
+        df = daily_data["QQQ"].copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date")
         
         # 计算 MA
         ma_df = calculate_moving_averages(df)
@@ -524,33 +527,33 @@ def display_qqq_chart(result: dict) -> None:
         
         # 添加收盘价
         fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df["Close"],
+            x=df["date"],
+            y=df["close"],
             name="QQQ Close",
             line=dict(color="#1f77b4", width=2),
         ))
         
         # 添加移动平均线
-        if "MA20" in ma_df.columns:
+        if "ma20" in ma_df.columns:
             fig.add_trace(go.Scatter(
-                x=ma_df.index,
-                y=ma_df["MA20"],
+                x=ma_df["date"],
+                y=ma_df["ma20"],
                 name="MA20",
                 line=dict(color="#ff7f0e", width=1, dash="dash"),
             ))
         
-        if "MA50" in ma_df.columns:
+        if "ma50" in ma_df.columns:
             fig.add_trace(go.Scatter(
-                x=ma_df.index,
-                y=ma_df["MA50"],
+                x=ma_df["date"],
+                y=ma_df["ma50"],
                 name="MA50",
                 line=dict(color="#2ca02c", width=1, dash="dash"),
             ))
         
-        if "MA200" in ma_df.columns:
+        if "ma200" in ma_df.columns:
             fig.add_trace(go.Scatter(
-                x=ma_df.index,
-                y=ma_df["MA200"],
+                x=ma_df["date"],
+                y=ma_df["ma200"],
                 name="MA200",
                 line=dict(color="#d62728", width=1, dash="dash"),
             ))

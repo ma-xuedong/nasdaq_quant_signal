@@ -14,6 +14,15 @@ from src.utils import setup_logger
 logger = setup_logger("database")
 
 
+def validate_required_columns(df: pd.DataFrame, required_columns: list[str]) -> bool:
+    """检查 DataFrame 是否包含必要字段。"""
+    missing = [col for col in required_columns if col not in df.columns]
+    if missing:
+        logger.warning(f"缺少必要字段: {missing}")
+        return False
+    return True
+
+
 def get_connection(db_path: str | None = None):
     """
     Get SQLite database connection.
@@ -159,14 +168,35 @@ def save_daily_prices(symbol: str, df: pd.DataFrame, db_path: str | None = None)
         db_path = DATABASE_PATH
     
     try:
+        df_to_save = df.copy()
+        df_to_save.columns = [str(col).strip().lower().replace(" ", "_") for col in df_to_save.columns]
+
+        if "adjclose" in df_to_save.columns and "adj_close" not in df_to_save.columns:
+            df_to_save = df_to_save.rename(columns={"adjclose": "adj_close"})
+
+        # 不使用 index 作为日期来源；若缺失 date，先从索引生成 date 列，再统一按 row["date"] 写入
+        if "date" not in df_to_save.columns:
+            if isinstance(df_to_save.index, pd.DatetimeIndex):
+                df_to_save = df_to_save.reset_index().rename(columns={"index": "date"})
+            else:
+                logger.warning(f"{symbol} 日线缺少 date 列")
+                return 0
+
+        if not validate_required_columns(df_to_save, ["date", "open", "high", "low", "close", "volume"]):
+            return 0
+
         conn = get_connection(db_path)
         cursor = conn.cursor()
         
         now = datetime.now().isoformat()
         count = 0
         
-        for idx, row in df.iterrows():
-            date_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)
+        for _, row in df_to_save.iterrows():
+            date_value = row.get("date")
+            if pd.isna(date_value):
+                continue
+
+            date_str = pd.to_datetime(date_value).strftime("%Y-%m-%d")
             
             cursor.execute("""
                 INSERT OR REPLACE INTO price_daily 
@@ -175,12 +205,12 @@ def save_daily_prices(symbol: str, df: pd.DataFrame, db_path: str | None = None)
             """, (
                 symbol,
                 date_str,
-                float(row.get("Open", 0)) if "Open" in row else None,
-                float(row.get("High", 0)) if "High" in row else None,
-                float(row.get("Low", 0)) if "Low" in row else None,
-                float(row.get("Close", 0)) if "Close" in row else None,
-                float(row.get("Adj Close", 0)) if "Adj Close" in row else None,
-                float(row.get("Volume", 0)) if "Volume" in row else None,
+                float(row.get("open", 0)) if "open" in row else None,
+                float(row.get("high", 0)) if "high" in row else None,
+                float(row.get("low", 0)) if "low" in row else None,
+                float(row.get("close", 0)) if "close" in row else None,
+                float(row.get("adj_close", 0)) if "adj_close" in row else None,
+                float(row.get("volume", 0)) if "volume" in row else None,
                 now,
                 now
             ))
@@ -213,14 +243,34 @@ def save_intraday_prices(
         db_path = DATABASE_PATH
     
     try:
+        df_to_save = df.copy()
+        df_to_save.columns = [str(col).strip().lower().replace(" ", "_") for col in df_to_save.columns]
+
+        # 不使用 index 作为时间来源；若缺失 datetime，先从索引生成 datetime 列，再统一按 row["datetime"] 写入
+        if "datetime" not in df_to_save.columns:
+            if "date" in df_to_save.columns:
+                df_to_save = df_to_save.rename(columns={"date": "datetime"})
+            elif isinstance(df_to_save.index, pd.DatetimeIndex):
+                df_to_save = df_to_save.reset_index().rename(columns={"index": "datetime"})
+            else:
+                logger.warning(f"{symbol} 分钟线缺少 datetime 列")
+                return 0
+
+        if not validate_required_columns(df_to_save, ["datetime", "open", "high", "low", "close", "volume"]):
+            return 0
+
         conn = get_connection(db_path)
         cursor = conn.cursor()
         
         now = datetime.now().isoformat()
         count = 0
         
-        for idx, row in df.iterrows():
-            datetime_str = idx.strftime("%Y-%m-%d %H:%M:%S") if hasattr(idx, "strftime") else str(idx)
+        for _, row in df_to_save.iterrows():
+            datetime_value = row.get("datetime")
+            if pd.isna(datetime_value):
+                continue
+
+            datetime_str = pd.to_datetime(datetime_value).strftime("%Y-%m-%d %H:%M:%S")
             
             cursor.execute("""
                 INSERT OR REPLACE INTO price_intraday
@@ -230,11 +280,11 @@ def save_intraday_prices(
                 symbol,
                 datetime_str,
                 interval,
-                float(row.get("Open", 0)) if "Open" in row else None,
-                float(row.get("High", 0)) if "High" in row else None,
-                float(row.get("Low", 0)) if "Low" in row else None,
-                float(row.get("Close", 0)) if "Close" in row else None,
-                float(row.get("Volume", 0)) if "Volume" in row else None,
+                float(row.get("open", 0)) if "open" in row else None,
+                float(row.get("high", 0)) if "high" in row else None,
+                float(row.get("low", 0)) if "low" in row else None,
+                float(row.get("close", 0)) if "close" in row else None,
+                float(row.get("volume", 0)) if "volume" in row else None,
                 now
             ))
             count += 1
@@ -265,14 +315,29 @@ def save_indicator_daily(
         db_path = DATABASE_PATH
     
     try:
+        df_to_save = df.copy()
+
+        if "date" in df_to_save.columns:
+            df_to_save["date"] = pd.to_datetime(df_to_save["date"], errors="coerce")
+        elif isinstance(df_to_save.index, pd.DatetimeIndex):
+            df_to_save = df_to_save.reset_index().rename(columns={"index": "date"})
+            df_to_save["date"] = pd.to_datetime(df_to_save["date"], errors="coerce")
+        else:
+            logger.warning(f"{symbol} indicator data 缺少 date 列")
+            return 0
+
         conn = get_connection(db_path)
         cursor = conn.cursor()
         
         now = datetime.now().isoformat()
         count = 0
         
-        for idx, row in df.iterrows():
-            date_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)
+        for _, row in df_to_save.iterrows():
+            date_value = row.get("date")
+            if pd.isna(date_value):
+                continue
+
+            date_str = pd.to_datetime(date_value).strftime("%Y-%m-%d")
             
             cursor.execute("""
                 INSERT OR REPLACE INTO indicator_daily

@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pandas as pd
+
 from config.settings import (
     RISK_DISCLOSURE,
     ETF_SYMBOLS,
@@ -16,11 +18,7 @@ from src.data_fetcher import (
 )
 from src.indicators import (
     build_indicator_snapshot,
-    calculate_moving_averages,
-    calculate_ma_slope,
-    calculate_atr,
-    calculate_volume_ratio,
-    calculate_daily_return,
+    build_full_indicator_dataframe,
 )
 from src.scoring import calculate_tqqq_score, calculate_sqqq_score, calculate_final_score
 from src.risk_filter import get_risk_deduction
@@ -34,49 +32,21 @@ from src.database import (
 )
 
 
-def build_indicator_dataframe(symbol: str, df: dict) -> dict:
+def build_indicator_dataframe(symbol: str, df):
     """
     构建某个标的的指标数据框。
     
     参数：
         symbol: 标的代码
-        df: 包含日线数据的字典
+        df: 包含日线数据的 DataFrame
         
     返回：
-        包含指标的字典
+        包含指标字段的 DataFrame
     """
-    if not df or df.empty:
-        return {}
+    if df is None or df.empty:
+        return pd.DataFrame()
     
-    # 计算各个指标
-    ma_df = calculate_moving_averages(df)
-    atr_series = calculate_atr(df)
-    volume_ratio_series = calculate_volume_ratio(df)
-    daily_return_series = calculate_daily_return(df)
-    
-    # 计算 MA 斜率
-    ma_slopes = calculate_ma_slope(df)
-    
-    # 合并为一个数据框
-    result = {}
-    for idx in df.index:
-        result[idx] = {
-            "ma5": ma_df.loc[idx, "MA5"] if idx in ma_df.index else None,
-            "ma20": ma_df.loc[idx, "MA20"] if idx in ma_df.index else None,
-            "ma50": ma_df.loc[idx, "MA50"] if idx in ma_df.index else None,
-            "ma200": ma_df.loc[idx, "MA200"] if idx in ma_df.index else None,
-            "ma20_slope": ma_slopes.get("MA20_slope", {}).get(idx) if isinstance(ma_slopes.get("MA20_slope"), dict) else None,
-            "ma50_slope": ma_slopes.get("MA50_slope", {}).get(idx) if isinstance(ma_slopes.get("MA50_slope"), dict) else None,
-            "ma20_slope_pct": ma_slopes.get("MA20_slope_pct", {}).get(idx) if isinstance(ma_slopes.get("MA20_slope_pct"), dict) else None,
-            "ma50_slope_pct": ma_slopes.get("MA50_slope_pct", {}).get(idx) if isinstance(ma_slopes.get("MA50_slope_pct"), dict) else None,
-            "atr14": atr_series.loc[idx] if idx in atr_series.index else None,
-            "daily_return": daily_return_series.loc[idx] if idx in daily_return_series.index else None,
-            "volume_ratio": volume_ratio_series.loc[idx] if idx in volume_ratio_series.index else None,
-        }
-    
-    # 转换为 DataFrame
-    import pandas as pd
-    return pd.DataFrame(result).T
+    return build_full_indicator_dataframe(df)
 
 
 def main() -> None:
@@ -336,9 +306,7 @@ def run_backtest_report():
 if __name__ == "__main__":
     import sys
 
-    # 检查是否有命令行参数
     if len(sys.argv) > 1 and sys.argv[1] == "--backtest":
         run_backtest_report()
     else:
-        run_complete_test()
-    main()
+        main()

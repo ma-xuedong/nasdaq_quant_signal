@@ -13,6 +13,60 @@ from src.utils import setup_logger
 logger = setup_logger("data_fetcher")
 
 
+def normalize_ohlcv_dataframe(
+    df: pd.DataFrame,
+    symbol: str,
+    is_intraday: bool = False,
+) -> pd.DataFrame:
+    """标准化 yfinance 返回的 OHLCV 数据字段。"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    normalized = df.copy()
+    normalized = normalized.reset_index(drop=False)
+    normalized.columns = [str(col).strip().lower().replace(" ", "_") for col in normalized.columns]
+
+    if "adj_close" not in normalized.columns and "adjclose" in normalized.columns:
+        normalized = normalized.rename(columns={"adjclose": "adj_close"})
+
+    if is_intraday:
+        if "datetime" not in normalized.columns:
+            if "date" in normalized.columns:
+                normalized = normalized.rename(columns={"date": "datetime"})
+            elif "index" in normalized.columns:
+                normalized = normalized.rename(columns={"index": "datetime"})
+        if "datetime" in normalized.columns:
+            normalized["datetime"] = pd.to_datetime(normalized["datetime"], errors="coerce")
+    else:
+        if "date" not in normalized.columns:
+            if "datetime" in normalized.columns:
+                normalized = normalized.rename(columns={"datetime": "date"})
+            elif "index" in normalized.columns:
+                normalized = normalized.rename(columns={"index": "date"})
+        if "date" in normalized.columns:
+            normalized["date"] = pd.to_datetime(normalized["date"], errors="coerce")
+
+    normalized["symbol"] = symbol
+
+    if is_intraday:
+        required_columns = ["datetime", "open", "high", "low", "close", "volume", "symbol"]
+    else:
+        required_columns = ["date", "open", "high", "low", "close", "volume", "symbol"]
+
+    for col in required_columns:
+        if col not in normalized.columns:
+            normalized[col] = pd.NA
+
+    sort_col = "datetime" if is_intraday else "date"
+    normalized = normalized.sort_values(sort_col).reset_index(drop=True)
+
+    keep_cols = required_columns.copy()
+    if not is_intraday and "adj_close" in normalized.columns:
+        keep_cols.insert(5, "adj_close")
+
+    return normalized[keep_cols]
+
+
 def fetch_daily_data(symbol: str, period: str = "1y") -> pd.DataFrame:
     """
     使用 yfinance 抓取单个标的的日线数据。
@@ -41,20 +95,7 @@ def fetch_daily_data(symbol: str, period: str = "1y") -> pd.DataFrame:
             logger.warning(f"{symbol} 返回空数据")
             return pd.DataFrame()
 
-        # 重置索引，将日期列转为普通列
-        df.reset_index(inplace=True)
-
-        # 统一字段名为小写
-        df.columns = df.columns.str.lower()
-
-        # 确保有 symbol 列
-        df["symbol"] = symbol
-
-        # 验证必要字段
-        required_columns = ["date", "open", "high", "low", "close", "volume", "symbol"]
-        for col in required_columns:
-            if col not in df.columns:
-                logger.warning(f"{symbol} 缺失字段：{col}")
+        df = normalize_ohlcv_dataframe(df, symbol=symbol, is_intraday=False)
 
         logger.info(f"{symbol} 日线数据获取成功，共 {len(df)} 条。")
         return df
@@ -97,22 +138,7 @@ def fetch_intraday_data(
             logger.warning(f"{symbol} {interval} 数据返回空结果")
             return pd.DataFrame()
 
-        # 重置索引，将日期列转为普通列
-        df.reset_index(inplace=True)
-
-        # 统一字段名为小写
-        df.columns = df.columns.str.lower()
-
-        # 处理日期列名：yfinance可能返回 date 或 datetime
-        if "datetime" in df.columns:
-            pass
-        elif "date" in df.columns:
-            df.rename(columns={"date": "datetime"}, inplace=True)
-        else:
-            logger.warning(f"{symbol} 缺失日期列")
-
-        # 确保有 symbol 列
-        df["symbol"] = symbol
+        df = normalize_ohlcv_dataframe(df, symbol=symbol, is_intraday=True)
 
         logger.info(f"{symbol} 分钟线数据获取成功，共 {len(df)} 条。")
         return df

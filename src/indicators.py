@@ -459,6 +459,40 @@ def analyze_mega_cap_tech_strength(
         }
 
 
+def build_full_indicator_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    对单个标的构建完整指标 DataFrame。
+
+    输出字段（小写）：
+        ma5, ma20, ma50, ma200,
+        ma20_slope, ma50_slope,
+        ma20_slope_pct, ma50_slope_pct,
+        atr14, volume_ratio, daily_return
+    """
+    if df is None or df.empty:
+        logger.warning("build_full_indicator_dataframe: 输入数据为空")
+        return pd.DataFrame()
+
+    result = df.copy()
+
+    if "date" in result.columns:
+        result["date"] = pd.to_datetime(result["date"], errors="coerce")
+        result = result.sort_values("date").reset_index(drop=True)
+
+    result = calculate_moving_averages(result)
+    result = calculate_ma_slope(result, "ma20", window=5)
+    result = calculate_ma_slope(result, "ma50", window=5)
+    result = calculate_atr(result, window=14)
+    result = calculate_volume_ratio(result, window=20)
+
+    if "close" in result.columns:
+        result["daily_return"] = result["close"].pct_change().fillna(0.0)
+    else:
+        result["daily_return"] = 0.0
+
+    return result
+
+
 def build_indicator_snapshot(
     daily_data: dict[str, pd.DataFrame],
     intraday_data: dict[str, pd.DataFrame] | None = None

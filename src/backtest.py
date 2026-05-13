@@ -17,7 +17,7 @@ import pandas as pd
 
 from src.data_fetcher import fetch_daily_data
 from src.indicators import build_indicator_snapshot
-from src.risk_filter import calculate_risk_score
+from src.risk_filter import get_risk_deduction
 from src.scoring import calculate_tqqq_score, calculate_sqqq_score
 from src.utils import setup_logger
 
@@ -51,10 +51,19 @@ def generate_historical_scores(
     """
     logger.info("开始生成历史评分...")
 
-    # 找出共同日期范围
+    # 找出共同日期范围（统一使用 date 列，不假设 index 是日期）
     all_dates = set()
+    normalized_data: dict[str, pd.DataFrame] = {}
     for symbol, df in historical_data.items():
-        all_dates.update(df.index)
+        if df is None or df.empty:
+            continue
+        working_df = df.copy()
+        if "date" not in working_df.columns:
+            continue
+        working_df["date"] = pd.to_datetime(working_df["date"], errors="coerce")
+        working_df = working_df.dropna(subset=["date"]).sort_values("date")
+        normalized_data[symbol] = working_df
+        all_dates.update(working_df["date"].tolist())
     all_dates = sorted(all_dates)
 
     if len(all_dates) < 200:
@@ -71,8 +80,8 @@ def generate_historical_scores(
 
         # 获取截至当前日期的所有历史数据（不包含未来）
         historical_slice = {}
-        for symbol, df in historical_data.items():
-            historical_slice[symbol] = df.loc[:current_date].copy()
+        for symbol, df in normalized_data.items():
+            historical_slice[symbol] = df[df["date"] <= current_date].copy()
 
         try:
             # 构建指标快照
@@ -87,8 +96,8 @@ def generate_historical_scores(
             sqqq_base = sqqq_result.get("base_score", 50)
 
             # 计算风险扣分
-            risk_result = calculate_risk_score(indicator_snapshot)
-            risk_score = risk_result.get("risk_score", 0)
+            risk_result = get_risk_deduction(str(pd.to_datetime(current_date).date()), indicator_snapshot)
+            risk_score = risk_result.get("deduction", 0)
 
             # 计算最终评分（扣除风险）
             tqqq_final = max(0, tqqq_base - risk_score)
@@ -225,10 +234,27 @@ def simulate_trades(
     logger.info("模拟交易...")
 
     trades = []
-    dates_list = price_data["TQQQ"].index.tolist()
+
+    price_frames: dict[str, pd.DataFrame] = {}
+    for symbol in ["TQQQ", "SQQQ"]:
+        if symbol not in price_data or price_data[symbol] is None or price_data[symbol].empty:
+            continue
+        df_symbol = price_data[symbol].copy()
+        if "date" not in df_symbol.columns:
+            continue
+        df_symbol["date"] = pd.to_datetime(df_symbol["date"], errors="coerce")
+        df_symbol = df_symbol.dropna(subset=["date"]).sort_values("date")
+        price_frames[symbol] = df_symbol.set_index("date", drop=False)
+
+    if "TQQQ" not in price_frames:
+        return pd.DataFrame()
+
+    dates_list = price_frames["TQQQ"]["date"].tolist()
 
     for _, row in signals_df.iterrows():
-        signal_date = row["date"]
+        signal_date = pd.to_datetime(row["date"], errors="coerce")
+        if pd.isna(signal_date):
+            continue
         signal = row["signal"]
 
         # 找到信号日期在价格数据中的位置
@@ -261,7 +287,7 @@ def simulate_trades(
 
         # 获取入场价格（次日开盘 = 当日收盘价的近似）
         try:
-            entry_price = price_data[symbol].loc[entry_date, "Close"]
+            entry_price = price_frames[symbol].loc[entry_date, "open"]
         except KeyError:
             continue
 
@@ -278,13 +304,13 @@ def simulate_trades(
                 # 超出数据范围，按最后数据卖出
                 exit_idx = len(dates_list) - 1
                 exit_date = dates_list[exit_idx]
-                exit_price = price_data[symbol].iloc[exit_idx]["Close"]
+                exit_price = price_frames[symbol].iloc[exit_idx]["close"]
                 exit_reason = "DataEnd"
                 holding_days = hold_day
                 break
 
             check_date = dates_list[check_idx]
-            check_price = price_data[symbol].loc[check_date, "Close"]
+            check_price = price_frames[symbol].loc[check_date, "close"]
 
             # 计算收益率（考虑交易成本）
             raw_return = (check_price - entry_price) / entry_price
@@ -313,7 +339,7 @@ def simulate_trades(
         # 如果未触发止盈/止损，按最后日期卖出
         if exit_reason == "Unknown":
             exit_date = dates_list[exit_idx]
-            exit_price = price_data[symbol].loc[exit_date, "Close"]
+            exit_price = price_frames[symbol].loc[exit_date, "close"]
             exit_reason = "TimeOut"
             holding_days = max_holding_days
 
@@ -474,11 +500,18 @@ def run_backtest(
                 logger.warning(f"  {symbol} 数据获取失败，跳过")
                 continue
 
+            if "date" not in df.columns:
+                logger.warning(f"  {symbol} 缺少 date 列，跳过")
+                continue
+
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
             # 按日期范围筛选
             if start_date:
-                df = df[df.index >= start_date]
+                df = df[df["date"] >= pd.to_datetime(start_date)]
             if end_date:
-                df = df[df.index <= end_date]
+                df = df[df["date"] <= pd.to_datetime(end_date)]
 
             historical_data[symbol] = df
 
