@@ -19,15 +19,15 @@ TQQQ / SQQQ 纳指量化信号辅助系统完整工程。
 
 ## 当前阶段
 
-**全部 7 个阶段已完成** ✓
+**当前状态：第一期 MVP 已完成；第二期已接入并正在收口优化**
 
-- ✅ **阶段一**：项目结构搭建（配置、依赖、基础入口）
-- ✅ **阶段二**：数据抓取模块（yfinance 集成，6 个函数）
-- ✅ **阶段三**：技术指标计算（10 个指标，50+ 参数）
-- ✅ **阶段四**：评分与风险管理（TQQQ/SQQQ 评分，风险扣分）
-- ✅ **阶段五**：SQLite 数据库（5 个表，历史记录）
-- ✅ **阶段六**：Streamlit 可视化面板（12 个图表，实时更新）
-- ✅ **阶段七**：回测模块与后续扩展（完整的历史回测系统）
+- ✅ 第一期开发表现层与策略链路：指标、评分、风控、数据库、回测、Streamlit
+- ✅ 第二期已接入：数据源抽象、缓存、限流重试、统一 pipeline、数据质量评估
+- 🔧 第二期当前重点：稳定性、可解释性、测试覆盖与文档收口
+
+说明：
+- 本系统仅用于个人量化研究与交易辅助，不是自动交易系统。
+- 当前尚未完成严格样本外验证，不应作为自动交易依据。
 
 ## 快速开始
 
@@ -128,6 +128,8 @@ TQQQ / SQQQ 回测报告
 ...
 ```
 
+说明：上述回测指标和输出为示例格式，不代表真实收益，不构成投资建议。
+
 ## 项目结构
 
 ```
@@ -138,7 +140,12 @@ nasdaq_quant_signal/
 │   ├── settings.py               # 全局配置（标的代码、参数、回测参数）
 │   └── __init__.py
 ├── src/
-│   ├── data_fetcher.py           # 数据抓取（yfinance）
+│   ├── data_provider/            # 数据源抽象层（provider接口与实现）
+│   ├── data_fetcher.py           # 数据抓取门面层（兼容旧调用）
+│   ├── cache.py                  # 缓存与fallback逻辑
+│   ├── rate_limiter.py           # 请求节流与失败重试
+│   ├── pipeline.py               # 统一信号流程入口
+│   ├── data_quality.py           # 数据质量与置信度评估
 │   ├── indicators.py             # 技术指标计算（10 个指标）
 │   ├── scoring.py                # 评分系统（5 个模块）
 │   ├── risk_filter.py            # 风险管理和扣分
@@ -160,13 +167,52 @@ nasdaq_quant_signal/
 
 ### 1. 数据抓取（src/data_fetcher.py）
 
-从 Yahoo Finance 获取市场数据：
+通过 provider 工厂调用数据源并保持兼容接口：
 - `fetch_daily_data()` - 日线 OHLCV 数据
 - `fetch_intraday_data()` - 分钟线数据
 - `fetch_multiple_daily_data()` - 批量日线数据
 - `fetch_multiple_intraday_data()` - 批量分钟线数据
 - `fetch_latest_price()` - 最新价格
 - `fetch_market_snapshot()` - 市场快照
+
+### 1.1 数据源抽象（src/data_provider/）
+
+用于隔离 yfinance、Finnhub、Tiingo、IBKR 等不同数据源差异：
+- `base_provider.py`：统一抽象接口
+- `yfinance_provider.py`：当前默认实现
+- `provider_factory.py`：根据配置选择 provider
+
+### 1.2 缓存与容错（src/cache.py）
+
+缓存模块负责：
+- 优先读缓存
+- 缓存过期后请求 API
+- API 失败时回退 fallback_cache
+- 使用 `cache_metadata` 维护缓存状态
+
+### 1.3 限流与重试（src/rate_limiter.py）
+
+用于降低免费 API 限流风险：
+- 请求间隔控制
+- 指数退避重试
+
+### 1.4 统一流程（src/pipeline.py）
+
+主流程统一由 pipeline 管理，供命令行与页面复用：
+- 获取数据（API + cache + fallback）
+- 构建指标
+- 评分与风险扣分
+- 数据质量评估
+- 保存数据库并输出统一结构
+
+### 1.5 数据质量评估（src/data_quality.py）
+
+输出数据可信度信息：
+- `quality_score`
+- `quality_level`
+- `confidence`
+- `missing_symbols`
+- `cache_fallback_count`
 
 ### 2. 技术指标（src/indicators.py）
 
@@ -318,6 +364,21 @@ SQQQ 最终评分：32 分
 - 1 GB 磁盘空间（包括历史数据）
 - 互联网连接（数据抓取）
 - 浏览器（Streamlit 面板）
+
+## 测试与运行命令
+
+```bash
+python main.py
+python main.py --backtest
+streamlit run app.py
+python test_indicators.py
+python test_scoring.py
+python test_database.py
+python test_cache.py
+python test_pipeline.py
+python test_data_quality.py
+python test_rate_limiter.py
+```
 
 ## 依赖包
 

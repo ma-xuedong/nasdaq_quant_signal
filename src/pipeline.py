@@ -20,29 +20,24 @@ from src.database import init_database, save_indicator_daily, save_market_score
 from src.indicators import build_full_indicator_dataframe, build_indicator_snapshot
 from src.market_state import classify_overall_market_state, generate_market_summary
 from src.risk_filter import get_risk_deduction
+from src.rate_limiter import sleep_between_requests
 from src.scoring import calculate_final_score, calculate_sqqq_score, calculate_tqqq_score
 from src.utils import setup_logger
 
 logger = setup_logger("pipeline")
 
 
-CORE_DAILY_SYMBOLS = ["QQQ", "SPY", "QQQE", "TQQQ", "SQQQ"]
-
-
-def _build_symbol_universe() -> list[str]:
-    symbols: list[str] = []
-    symbols.extend(CORE_DAILY_SYMBOLS)
-    symbols.extend(MEGA_CAP_TECH_SYMBOLS)
-    symbols.extend(list(VOLATILITY_SYMBOLS.values()))
-    symbols.extend(list(FUTURES_SYMBOLS.values()))
-
-    deduped: list[str] = []
-    seen = set()
-    for symbol in symbols:
-        if symbol not in seen:
-            seen.add(symbol)
-            deduped.append(symbol)
-    return deduped
+SYMBOL_BATCHES = [
+    ["QQQ", "SPY", "TQQQ", "SQQQ"],
+    ["QQQE", VOLATILITY_SYMBOLS["VIX"], VOLATILITY_SYMBOLS["VXN"]],
+    MEGA_CAP_TECH_SYMBOLS,
+    [
+        FUTURES_SYMBOLS["NQ"],
+        FUTURES_SYMBOLS["ES"],
+        FUTURES_SYMBOLS["MNQ"],
+        FUTURES_SYMBOLS["MES"],
+    ],
+]
 
 
 def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict:
@@ -58,23 +53,26 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
     cache_status: dict[str, dict] = {}
     warnings: list[str] = []
 
-    for symbol in _build_symbol_universe():
-        if use_cache:
-            df, meta = get_daily_data_with_cache(
-                symbol=symbol,
-                period="1y",
-                max_age_minutes=30,
-                db_path=DATABASE_PATH,
-            )
-        else:
-            df, meta = get_daily_data_with_cache(
-                symbol=symbol,
-                period="1y",
-                max_age_minutes=0,
-                db_path=DATABASE_PATH,
-            )
-        daily_data[symbol] = df
-        cache_status[symbol] = meta
+    for batch_idx, batch in enumerate(SYMBOL_BATCHES):
+        for symbol in batch:
+            if use_cache:
+                df, meta = get_daily_data_with_cache(
+                    symbol=symbol,
+                    period="1y",
+                    max_age_minutes=30,
+                    db_path=DATABASE_PATH,
+                )
+            else:
+                df, meta = get_daily_data_with_cache(
+                    symbol=symbol,
+                    period="1y",
+                    max_age_minutes=0,
+                    db_path=DATABASE_PATH,
+                )
+            daily_data[symbol] = df
+            cache_status[symbol] = meta
+        if batch_idx < len(SYMBOL_BATCHES) - 1:
+            sleep_between_requests(2.0)
 
     if use_cache:
         qqq_intraday, intraday_meta = get_intraday_data_with_cache(
@@ -130,6 +128,13 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
     if data_quality.get("quality_score", 0) < 50:
         warnings.append("数据质量较低，当前评分可信度不足，建议仅观察。")
         market_state = "仅观察（数据质量不足）"
+        summary = summary + "\n\n【数据质量附加提示】\n数据质量较低，当前评分仅可用于观察，不建议据此交易。"
+    elif data_quality.get("quality_score", 0) < 70:
+        warnings.append("数据质量一般，信号仅作弱参考，不建议重仓。")
+        summary = summary + "\n\n【数据质量附加提示】\n数据质量一般，建议轻仓或继续观察。"
+
+    if cache_status.get("QQQ", {}).get("source") == "fallback_cache":
+        warnings.append("QQQ 使用 fallback_cache，核心行情非最新 API，建议避免激进交易。")
 
     if save_to_db:
         try:

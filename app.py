@@ -1,7 +1,6 @@
 """Streamlit web dashboard for TQQQ/SQQQ trading signals."""
 
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,30 +10,13 @@ from config.settings import (
     RISK_DISCLOSURE,
     MEGA_CAP_TECH_SYMBOLS,
 )
-from src.data_fetcher import (
-    fetch_daily_data,
-    fetch_intraday_data,
-)
 from src.pipeline import run_signal_pipeline
 from src.indicators import (
-    build_indicator_snapshot,
     calculate_moving_averages,
-    calculate_ma_slope,
-    calculate_atr,
-    calculate_volume_ratio,
-    calculate_daily_return,
-)
-from src.scoring import calculate_tqqq_score, calculate_sqqq_score, calculate_final_score
-from src.risk_filter import get_risk_deduction
-from src.market_state import (
-    generate_market_summary,
-    classify_overall_market_state,
 )
 from src.database import (
     init_database,
-    save_market_score,
     load_recent_market_scores,
-    load_daily_prices,
 )
 from src.utils import setup_logger
 
@@ -140,8 +122,9 @@ def display_data_status(result: dict) -> None:
     with col2:
         st.metric("质量等级", data_quality.get("quality_level", "unknown"))
     with col3:
-        fallback_count = data_quality.get("cache_fallback_count", 0)
-        st.metric("缓存回退次数", fallback_count)
+        st.metric("信号置信度", data_quality.get("confidence", "unknown"))
+
+    st.caption(f"缓存回退次数：{data_quality.get('cache_fallback_count', 0)}")
 
     records = []
     for symbol, meta in cache_status.items():

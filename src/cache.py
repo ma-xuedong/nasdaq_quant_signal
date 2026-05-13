@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -12,6 +12,31 @@ from src.database import get_connection, save_daily_prices, save_intraday_prices
 from src.utils import setup_logger
 
 logger = setup_logger("cache")
+
+
+def _now_utc() -> datetime:
+    """Return timezone-aware UTC now."""
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(dt: datetime) -> str:
+    """Serialize datetime to ISO format in UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    """Parse ISO datetime string safely."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def init_cache_metadata_table(db_path: str | None = None) -> None:
@@ -59,7 +84,7 @@ def build_cache_key(
     return "_".join(parts)
 
 
-def _load_cache_meta(cache_key: str, db_path: str | None = None) -> dict:
+def get_cache_metadata(cache_key: str, db_path: str | None = None) -> dict:
     if db_path is None:
         db_path = DATABASE_PATH
 
@@ -83,18 +108,14 @@ def _load_cache_meta(cache_key: str, db_path: str | None = None) -> dict:
 
 def is_cache_fresh(cache_key: str, db_path: str | None = None) -> bool:
     """Check whether cache key is still fresh."""
-    metadata = _load_cache_meta(cache_key, db_path=db_path)
+    metadata = get_cache_metadata(cache_key, db_path=db_path)
     if not metadata:
         return False
 
-    expires_at = metadata.get("expires_at")
-    if not expires_at:
+    expires_at = _parse_datetime(metadata.get("expires_at"))
+    if expires_at is None:
         return False
-
-    try:
-        return datetime.fromisoformat(expires_at) > datetime.now()
-    except Exception:
-        return False
+    return _now_utc() < expires_at
 
 
 def update_cache_metadata(
@@ -113,7 +134,7 @@ def update_cache_metadata(
     if db_path is None:
         db_path = DATABASE_PATH
 
-    now = datetime.now().isoformat()
+    now = _iso_utc(_now_utc())
 
     conn = get_connection(db_path)
     try:
@@ -153,23 +174,20 @@ def update_cache_metadata(
         conn.close()
 
 
-def get_cached_daily_data(symbol: str, max_age_minutes: int = 30, db_path: str | None = None) -> pd.DataFrame:
-    """Read recent daily data from DB cache."""
+def get_cached_daily_data(symbol: str, db_path: str | None = None) -> pd.DataFrame:
+    """Read daily data cache from DB (no freshness judgement)."""
     if db_path is None:
         db_path = DATABASE_PATH
-
-    threshold = datetime.now() - timedelta(minutes=max_age_minutes)
-    threshold_str = threshold.strftime("%Y-%m-%d")
 
     conn = get_connection(db_path)
     try:
         query = """
             SELECT date, open, high, low, close, adj_close, volume, symbol
             FROM price_daily
-            WHERE symbol = ? AND date >= ?
+            WHERE symbol = ?
             ORDER BY date ASC
         """
-        df = pd.read_sql_query(query, conn, params=(symbol, threshold_str))
+        df = pd.read_sql_query(query, conn, params=(symbol,))
         if not df.empty:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
@@ -201,25 +219,21 @@ def get_latest_cached_daily_data(symbol: str, db_path: str | None = None) -> pd.
 def get_cached_intraday_data(
     symbol: str,
     interval: str = "5m",
-    max_age_minutes: int = 5,
     db_path: str | None = None,
 ) -> pd.DataFrame:
-    """Read recent intraday data from DB cache."""
+    """Read intraday data cache from DB (no freshness judgement)."""
     if db_path is None:
         db_path = DATABASE_PATH
-
-    threshold = datetime.now() - timedelta(minutes=max_age_minutes)
-    threshold_str = threshold.strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_connection(db_path)
     try:
         query = """
             SELECT datetime, open, high, low, close, volume, symbol
             FROM price_intraday
-            WHERE symbol = ? AND interval = ? AND datetime >= ?
+            WHERE symbol = ? AND interval = ?
             ORDER BY datetime ASC
         """
-        df = pd.read_sql_query(query, conn, params=(symbol, interval, threshold_str))
+        df = pd.read_sql_query(query, conn, params=(symbol, interval))
         if not df.empty:
             df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
         return df
@@ -266,8 +280,13 @@ def get_daily_data_with_cache(
 
     cache_key = build_cache_key(symbol=symbol, data_type="daily", period=period)
     provider = get_data_provider()
+    metadata = get_cache_metadata(cache_key=cache_key, db_path=db_path)
 
-    cached_df = get_cached_daily_data(symbol=symbol, max_age_minutes=max_age_minutes, db_path=db_path)
+    if is_cache_fresh(cache_key=cache_key, db_path=db_path):
+        cached_df = get_cached_daily_data(symbol=symbol, db_path=db_path)
+    else:
+        cached_df = pd.DataFrame()
+
     if not cached_df.empty:
         meta = {
             "symbol": symbol,
@@ -276,26 +295,15 @@ def get_daily_data_with_cache(
             "is_fallback": False,
             "message": "使用缓存数据",
             "provider": provider.get_provider_name(),
+            "last_updated": metadata.get("last_updated", ""),
         }
-        expires_at = (datetime.now() + timedelta(minutes=max_age_minutes)).isoformat()
-        update_cache_metadata(
-            cache_key=cache_key,
-            symbol=symbol,
-            data_type="daily",
-            interval=None,
-            provider=provider.get_provider_name(),
-            row_count=len(cached_df),
-            expires_at=expires_at,
-            status="fresh",
-            message=meta["message"],
-            db_path=db_path,
-        )
         return cached_df, meta
 
     api_df = provider.get_daily_data(symbol=symbol, period=period)
     if not api_df.empty:
         save_daily_prices(symbol=symbol, df=api_df, db_path=db_path)
-        expires_at = (datetime.now() + timedelta(minutes=max_age_minutes)).isoformat()
+        expires_at = _iso_utc(_now_utc() + timedelta(minutes=max_age_minutes))
+        now_iso = _iso_utc(_now_utc())
         update_cache_metadata(
             cache_key=cache_key,
             symbol=symbol,
@@ -315,10 +323,12 @@ def get_daily_data_with_cache(
             "is_fallback": False,
             "message": "使用最新 API 数据",
             "provider": provider.get_provider_name(),
+            "last_updated": now_iso,
         }
 
     fallback_df = get_latest_cached_daily_data(symbol=symbol, db_path=db_path)
     if not fallback_df.empty:
+        now_iso = _iso_utc(_now_utc())
         update_cache_metadata(
             cache_key=cache_key,
             symbol=symbol,
@@ -326,7 +336,7 @@ def get_daily_data_with_cache(
             interval=None,
             provider=provider.get_provider_name(),
             row_count=len(fallback_df),
-            expires_at=datetime.now().isoformat(),
+            expires_at=now_iso,
             status="fallback",
             message="API 失败，使用最近缓存",
             db_path=db_path,
@@ -338,8 +348,10 @@ def get_daily_data_with_cache(
             "is_fallback": True,
             "message": "API 失败，使用最近缓存",
             "provider": provider.get_provider_name(),
+            "last_updated": metadata.get("last_updated", now_iso),
         }
 
+    now_iso = _iso_utc(_now_utc())
     update_cache_metadata(
         cache_key=cache_key,
         symbol=symbol,
@@ -347,7 +359,7 @@ def get_daily_data_with_cache(
         interval=None,
         provider=provider.get_provider_name(),
         row_count=0,
-        expires_at=datetime.now().isoformat(),
+        expires_at=now_iso,
         status="failed",
         message="无可用数据",
         db_path=db_path,
@@ -359,6 +371,7 @@ def get_daily_data_with_cache(
         "is_fallback": False,
         "message": "无可用数据",
         "provider": provider.get_provider_name(),
+        "last_updated": "",
     }
 
 
@@ -382,27 +395,18 @@ def get_intraday_data_with_cache(
         interval=interval,
     )
     provider = get_data_provider()
+    metadata = get_cache_metadata(cache_key=cache_key, db_path=db_path)
 
-    cached_df = get_cached_intraday_data(
-        symbol=symbol,
-        interval=interval,
-        max_age_minutes=max_age_minutes,
-        db_path=db_path,
-    )
-    if not cached_df.empty:
-        expires_at = (datetime.now() + timedelta(minutes=max_age_minutes)).isoformat()
-        update_cache_metadata(
-            cache_key=cache_key,
+    if is_cache_fresh(cache_key=cache_key, db_path=db_path):
+        cached_df = get_cached_intraday_data(
             symbol=symbol,
-            data_type="intraday",
             interval=interval,
-            provider=provider.get_provider_name(),
-            row_count=len(cached_df),
-            expires_at=expires_at,
-            status="fresh",
-            message="使用缓存数据",
             db_path=db_path,
         )
+    else:
+        cached_df = pd.DataFrame()
+
+    if not cached_df.empty:
         return cached_df, {
             "symbol": symbol,
             "source": "cache",
@@ -410,12 +414,14 @@ def get_intraday_data_with_cache(
             "is_fallback": False,
             "message": "使用缓存数据",
             "provider": provider.get_provider_name(),
+            "last_updated": metadata.get("last_updated", ""),
         }
 
     api_df = provider.get_intraday_data(symbol=symbol, interval=interval, period=period)
     if not api_df.empty:
         save_intraday_prices(symbol=symbol, df=api_df, interval=interval, db_path=db_path)
-        expires_at = (datetime.now() + timedelta(minutes=max_age_minutes)).isoformat()
+        expires_at = _iso_utc(_now_utc() + timedelta(minutes=max_age_minutes))
+        now_iso = _iso_utc(_now_utc())
         update_cache_metadata(
             cache_key=cache_key,
             symbol=symbol,
@@ -435,10 +441,12 @@ def get_intraday_data_with_cache(
             "is_fallback": False,
             "message": "使用最新 API 数据",
             "provider": provider.get_provider_name(),
+            "last_updated": now_iso,
         }
 
     fallback_df = get_latest_cached_intraday_data(symbol=symbol, interval=interval, db_path=db_path)
     if not fallback_df.empty:
+        now_iso = _iso_utc(_now_utc())
         update_cache_metadata(
             cache_key=cache_key,
             symbol=symbol,
@@ -446,7 +454,7 @@ def get_intraday_data_with_cache(
             interval=interval,
             provider=provider.get_provider_name(),
             row_count=len(fallback_df),
-            expires_at=datetime.now().isoformat(),
+            expires_at=now_iso,
             status="fallback",
             message="API 失败，使用最近缓存",
             db_path=db_path,
@@ -458,8 +466,10 @@ def get_intraday_data_with_cache(
             "is_fallback": True,
             "message": "API 失败，使用最近缓存",
             "provider": provider.get_provider_name(),
+            "last_updated": metadata.get("last_updated", now_iso),
         }
 
+    now_iso = _iso_utc(_now_utc())
     update_cache_metadata(
         cache_key=cache_key,
         symbol=symbol,
@@ -467,7 +477,7 @@ def get_intraday_data_with_cache(
         interval=interval,
         provider=provider.get_provider_name(),
         row_count=0,
-        expires_at=datetime.now().isoformat(),
+        expires_at=now_iso,
         status="failed",
         message="无可用数据",
         db_path=db_path,
@@ -479,4 +489,5 @@ def get_intraday_data_with_cache(
         "is_fallback": False,
         "message": "无可用数据",
         "provider": provider.get_provider_name(),
+        "last_updated": "",
     }
