@@ -1,6 +1,6 @@
 # nasdaq_quant_signal
 
-TQQQ / SQQQ 纳指量化信号辅助系统完整工程。
+TQQQ / SQQQ 纳指量化信号辅助系统。
 
 ## 项目用途
 
@@ -19,11 +19,11 @@ TQQQ / SQQQ 纳指量化信号辅助系统完整工程。
 
 ## 当前阶段
 
-**当前状态：第一期 MVP 已完成；第二期已接入并正在收口优化**
+**当前状态：第一期 MVP 已完成；第二期工程化改造进行中（收口优化阶段）**
 
-- ✅ 第一期开发表现层与策略链路：指标、评分、风控、数据库、回测、Streamlit
+- ✅ 第一期 MVP：指标、评分、风控、数据库、回测、Streamlit
 - ✅ 第二期已接入：数据源抽象、缓存、限流重试、统一 pipeline、数据质量评估
-- 🔧 第二期当前重点：稳定性、可解释性、测试覆盖与文档收口
+- 🔧 第二期收口重点：缓存 freshness 严格校验、统一入口一致性、测试覆盖与文档同步
 
 说明：
 - 本系统仅用于个人量化研究与交易辅助，不是自动交易系统。
@@ -185,8 +185,9 @@ nasdaq_quant_signal/
 ### 1.2 缓存与容错（src/cache.py）
 
 缓存模块负责：
-- 优先读缓存
-- 缓存过期后请求 API
+- 先通过 `cache_metadata.expires_at` 判断 freshness
+- fresh cache 才直接返回
+- cache 过期后请求 API
 - API 失败时回退 fallback_cache
 - 使用 `cache_metadata` 维护缓存状态
 

@@ -780,33 +780,25 @@ def main() -> None:
     
     # 选项卡 1：实时分析
     with tab1:
+        if "signal_result" not in st.session_state:
+            st.session_state["signal_result"] = None
+
         # 数据刷新按钮
         col1, col2, col3 = st.columns([2, 1, 1])
-        
+
         with col2:
             if st.button("🔄 刷新数据并重新评分", use_container_width=True):
-                st.session_state.force_refresh = True
-        
+                result = fetch_and_calculate()
+                if result:
+                    st.session_state["signal_result"] = result
+
         with col3:
             if st.button("📊 查看最近记录", use_container_width=True):
                 st.session_state.show_recent = True
-        
-        # 获取数据
-        result = None
-        
-        if st.session_state.get("force_refresh", False):
-            result = fetch_and_calculate()
-            if result:
-                st.session_state.last_result = result
-                st.session_state.force_refresh = False
-                st.rerun()
-        else:
-            # 尝试从 session state 恢复
-            if "last_result" not in st.session_state:
-                st.info("💡 点击「刷新数据并重新评分」开始分析")
-                result = None
-            else:
-                result = st.session_state.last_result
+
+        result = st.session_state.get("signal_result")
+        if result is None:
+            st.info("💡 点击「刷新数据并重新评分」开始分析")
         
         # 如果有结果，显示所有信息
         if result is not None:

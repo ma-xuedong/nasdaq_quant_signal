@@ -270,22 +270,23 @@ def get_daily_data_with_cache(
     symbol: str,
     period: str = "1y",
     max_age_minutes: int = 30,
+    provider=None,
     db_path: str | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    """Get daily data with cache-first strategy and fallback support."""
+    """Get daily data with strict freshness check and fallback support."""
     if db_path is None:
         db_path = DATABASE_PATH
 
     init_cache_metadata_table(db_path)
 
     cache_key = build_cache_key(symbol=symbol, data_type="daily", period=period)
-    provider = get_data_provider()
+    provider = provider or get_data_provider()
     metadata = get_cache_metadata(cache_key=cache_key, db_path=db_path)
 
+    # 1) Only use cache when metadata says it is still fresh.
+    cached_df = pd.DataFrame()
     if is_cache_fresh(cache_key=cache_key, db_path=db_path):
         cached_df = get_cached_daily_data(symbol=symbol, db_path=db_path)
-    else:
-        cached_df = pd.DataFrame()
 
     if not cached_df.empty:
         meta = {
@@ -293,13 +294,21 @@ def get_daily_data_with_cache(
             "source": "cache",
             "is_fresh": True,
             "is_fallback": False,
+            "cache_key": cache_key,
             "message": "使用缓存数据",
             "provider": provider.get_provider_name(),
             "last_updated": metadata.get("last_updated", ""),
         }
         return cached_df, meta
 
-    api_df = provider.get_daily_data(symbol=symbol, period=period)
+    # 2) Cache is not fresh (or missing metadata), request API.
+    api_df = pd.DataFrame()
+    api_error = ""
+    try:
+        api_df = provider.get_daily_data(symbol=symbol, period=period)
+    except Exception as exc:
+        api_error = str(exc)
+
     if not api_df.empty:
         save_daily_prices(symbol=symbol, df=api_df, db_path=db_path)
         expires_at = _iso_utc(_now_utc() + timedelta(minutes=max_age_minutes))
@@ -321,14 +330,19 @@ def get_daily_data_with_cache(
             "source": "api",
             "is_fresh": True,
             "is_fallback": False,
+            "cache_key": cache_key,
             "message": "使用最新 API 数据",
             "provider": provider.get_provider_name(),
             "last_updated": now_iso,
         }
 
+    # 3) API failed or returned empty, fallback to latest stored cache.
     fallback_df = get_latest_cached_daily_data(symbol=symbol, db_path=db_path)
     if not fallback_df.empty:
         now_iso = _iso_utc(_now_utc())
+        fallback_msg = "API 失败，使用最近缓存"
+        if api_error:
+            fallback_msg = f"API 失败，使用最近缓存。错误：{api_error}"
         update_cache_metadata(
             cache_key=cache_key,
             symbol=symbol,
@@ -338,7 +352,7 @@ def get_daily_data_with_cache(
             row_count=len(fallback_df),
             expires_at=now_iso,
             status="fallback",
-            message="API 失败，使用最近缓存",
+            message=fallback_msg,
             db_path=db_path,
         )
         return fallback_df, {
@@ -346,12 +360,17 @@ def get_daily_data_with_cache(
             "source": "fallback_cache",
             "is_fresh": False,
             "is_fallback": True,
-            "message": "API 失败，使用最近缓存",
+            "cache_key": cache_key,
+            "message": fallback_msg,
             "provider": provider.get_provider_name(),
             "last_updated": metadata.get("last_updated", now_iso),
         }
 
+    # 4) API failed and no fallback cache exists.
     now_iso = _iso_utc(_now_utc())
+    missing_msg = "API 失败，且无可用缓存。"
+    if api_error:
+        missing_msg = f"API 失败，且无可用缓存。错误：{api_error}"
     update_cache_metadata(
         cache_key=cache_key,
         symbol=symbol,
@@ -361,15 +380,16 @@ def get_daily_data_with_cache(
         row_count=0,
         expires_at=now_iso,
         status="failed",
-        message="无可用数据",
+        message=missing_msg,
         db_path=db_path,
     )
     return pd.DataFrame(), {
         "symbol": symbol,
-        "source": "none",
+        "source": "missing",
         "is_fresh": False,
         "is_fallback": False,
-        "message": "无可用数据",
+        "cache_key": cache_key,
+        "message": missing_msg,
         "provider": provider.get_provider_name(),
         "last_updated": "",
     }
