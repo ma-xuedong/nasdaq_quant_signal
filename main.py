@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime
+from typing import Any
 
-from config.settings import BACKTEST_DISCLOSURE, RISK_DISCLOSURE
-from src.backtest import run_backtest
+from config.settings import RISK_DISCLOSURE
 from src.pipeline import run_signal_pipeline
+
+
+def print_section(title: str) -> None:
+    """Print a simple console section title."""
+    print()
+    print("=" * 12 + f" {title} " + "=" * 12)
 
 
 def print_warnings(warnings: list[str]) -> None:
@@ -15,18 +21,32 @@ def print_warnings(warnings: list[str]) -> None:
     if not warnings:
         return
 
-    print("\nWarnings:")
+    print_section("Warnings")
     for warning in warnings:
         print(f"- {warning}")
 
 
+def safe_get_number(data: dict[str, Any], key: str, default: float = 0.0) -> float:
+    """Safely read a numeric value from dict."""
+    value = data.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def main() -> None:
-    """Run the signal pipeline and print a concise report."""
+    """Run the main signal pipeline and print a console report."""
     print("====== TQQQ / SQQQ Signal Report ======")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
 
     result = run_signal_pipeline(save_to_db=True, use_cache=True)
+
+    if not isinstance(result, dict):
+        print("信号流程返回结果异常：result 不是 dict。")
+        print(RISK_DISCLOSURE)
+        return
+
     if not result.get("success", False):
         print("信号流程执行失败。")
         print_warnings(result.get("warnings", []))
@@ -37,18 +57,30 @@ def main() -> None:
     final_scores = result.get("final_scores", {})
     data_quality = result.get("data_quality", {})
 
-    print(f"TQQQ Final Score: {final_scores.get('tqqq_final_score', 0):.2f}")
-    print(f"SQQQ Final Score: {final_scores.get('sqqq_final_score', 0):.2f}")
+    tqqq_score = safe_get_number(final_scores, "tqqq_final_score")
+    sqqq_score = safe_get_number(final_scores, "sqqq_final_score")
+
+    print_section("Scores")
+    print(f"TQQQ Final Score: {tqqq_score:.2f}")
+    print(f"SQQQ Final Score: {sqqq_score:.2f}")
     print(f"Market State: {result.get('market_state', '未知')}")
+
+    print_section("Data Quality")
     print(
-        "Data Quality: "
-        f"{data_quality.get('quality_level', 'unknown')} "
-        f"({data_quality.get('quality_score', 0):.2f})"
+        f"Quality: {data_quality.get('quality_level', 'unknown')} "
+        f"({safe_get_number(data_quality, 'quality_score'):.2f})"
     )
-    print()
+
+    missing_symbols = data_quality.get("missing_symbols", [])
+    if missing_symbols:
+        print(f"Missing Symbols: {', '.join(missing_symbols)}")
+
+    cache_fallback_count = data_quality.get("cache_fallback_count", 0)
+    print(f"Cache Fallback Count: {cache_fallback_count}")
 
     summary = result.get("summary", "")
     if summary:
+        print_section("Summary")
         print(summary)
 
     print_warnings(result.get("warnings", []))
@@ -58,8 +90,14 @@ def main() -> None:
 
 
 def run_backtest_report() -> None:
-    """Run backtest from CLI and print metrics."""
+    """Run backtest report from command line."""
     print("====== Backtest Report ======")
+
+    try:
+        from src.backtest import run_backtest
+    except Exception as exc:
+        print(f"无法导入回测模块：{exc}")
+        return
 
     try:
         result = run_backtest()
@@ -67,20 +105,21 @@ def run_backtest_report() -> None:
         print(f"回测执行失败：{exc}")
         return
 
-    if result.get("status") != "success":
-        print(result.get("message", "暂无可用回测结果。"))
+    if not result:
+        print("暂无可用回测结果。")
         return
 
-    metrics = result.get("metrics", {})
+    metrics = result.get("metrics", result) if isinstance(result, dict) else {}
+
     if not metrics:
-        print("暂无可用回测结果。")
+        print("回测结果为空或格式异常。")
         return
 
     for key, value in metrics.items():
         print(f"{key}: {value}")
 
     print()
-    print(BACKTEST_DISCLOSURE)
+    print("回测结果仅用于策略研究，不代表未来表现，不构成投资建议。")
 
 
 if __name__ == "__main__":
