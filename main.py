@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime
 from typing import Any
 
@@ -89,41 +88,5 @@ def main() -> None:
     print(RISK_DISCLOSURE)
 
 
-def run_backtest_report() -> None:
-    """Run backtest report from command line."""
-    print("====== Backtest Report ======")
-
-    try:
-        from src.backtest import run_backtest
-    except Exception as exc:
-        print(f"无法导入回测模块：{exc}")
-        return
-
-    try:
-        result = run_backtest()
-    except Exception as exc:
-        print(f"回测执行失败：{exc}")
-        return
-
-    if not result:
-        print("暂无可用回测结果。")
-        return
-
-    metrics = result.get("metrics", result) if isinstance(result, dict) else {}
-
-    if not metrics:
-        print("回测结果为空或格式异常。")
-        return
-
-    for key, value in metrics.items():
-        print(f"{key}: {value}")
-
-    print()
-    print("回测结果仅用于策略研究，不代表未来表现，不构成投资建议。")
-
-
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--backtest":
-        run_backtest_report()
-    else:
-        main()
+    main()

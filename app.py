@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
 import streamlit as st
 
 from config.settings import RISK_DISCLOSURE
@@ -95,11 +94,6 @@ def render_indicator_snapshot(result: dict) -> None:
         st.json(snapshot)
 
 
-def render_history_placeholder() -> None:
-    """Render a placeholder for future historical charts."""
-    st.info("历史评分图可在后续版本中从数据库读取并展示。")
-
-
 if st.button("刷新数据并重新评分", type="primary"):
     with st.spinner("正在执行统一信号流程..."):
         st.session_state["signal_result"] = run_signal_pipeline(
@@ -134,6 +128,5 @@ render_warnings(result.get("warnings", []))
 render_signal_details(result)
 render_data_quality(result)
 render_indicator_snapshot(result)
-render_history_placeholder()
 
 st.warning(RISK_DISCLOSURE)

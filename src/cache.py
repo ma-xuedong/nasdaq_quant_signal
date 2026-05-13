@@ -283,7 +283,7 @@ def get_daily_data_with_cache(
     provider = provider or get_data_provider()
     metadata = get_cache_metadata(cache_key=cache_key, db_path=db_path)
 
-    # 1) Only use cache when metadata says it is still fresh.
+    # 1) Only use cache after freshness is confirmed by cache metadata.
     cached_df = pd.DataFrame()
     if is_cache_fresh(cache_key=cache_key, db_path=db_path):
         cached_df = get_cached_daily_data(symbol=symbol, db_path=db_path)
@@ -295,13 +295,13 @@ def get_daily_data_with_cache(
             "is_fresh": True,
             "is_fallback": False,
             "cache_key": cache_key,
-            "message": "使用缓存数据",
+            "message": "使用未过期缓存数据",
             "provider": provider.get_provider_name(),
             "last_updated": metadata.get("last_updated", ""),
         }
         return cached_df, meta
 
-    # 2) Cache is not fresh (or missing metadata), request API.
+    # 2) Cache is stale or missing, request API.
     api_df = pd.DataFrame()
     api_error = ""
     try:
