@@ -15,6 +15,7 @@ from src.data_fetcher import (
     fetch_daily_data,
     fetch_intraday_data,
 )
+from src.pipeline import run_signal_pipeline
 from src.indicators import (
     build_indicator_snapshot,
     calculate_moving_averages,
@@ -109,93 +110,62 @@ def fetch_and_calculate():
         包含所有计算结果的字典，或 None（失败时）
     """
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        
-        # 1. 获取数据
-        with st.spinner("正在获取日线数据..."):
-            symbols = ["QQQ", "SPY", "QQQE"] + MEGA_CAP_TECH_SYMBOLS
-            daily_data = {}
-            intraday_data = {}
-            
-            for symbol in symbols:
-                df = fetch_daily_data(symbol, period="1y")
-                if df is not None and not df.empty:
-                    daily_data[symbol] = df
-            
-            # 尝试获取分钟线数据
-            if "QQQ" in daily_data:
-                qqq_intraday = fetch_intraday_data("QQQ", interval="5m", period="1d")
-                if qqq_intraday is not None and not qqq_intraday.empty:
-                    intraday_data["QQQ"] = qqq_intraday
-        
-        # 检查核心数据
-        if "QQQ" not in daily_data or daily_data["QQQ"].empty:
-            st.error("❌ 核心数据缺失：无法获取 QQQ 数据")
+        with st.spinner("正在执行统一信号流程（含缓存与容错）..."):
+            result = run_signal_pipeline(save_to_db=True, use_cache=True)
+
+        if not result.get("success", False):
+            st.error(f"❌ 处理失败：{result.get('message', '未知错误')}")
+            for warning in result.get("warnings", []):
+                st.warning(warning)
             return None
-        
-        # 2. 计算指标
-        with st.spinner("正在计算技术指标..."):
-            indicator_snapshot = build_indicator_snapshot(daily_data, intraday_data)
-        
-        # 3. 评分计算
-        with st.spinner("正在计算评分..."):
-            tqqq_result = calculate_tqqq_score(indicator_snapshot)
-            sqqq_result = calculate_sqqq_score(indicator_snapshot)
-            
-            tqqq_base = tqqq_result.get("base_score", 0)
-            sqqq_base = sqqq_result.get("base_score", 0)
-        
-        # 4. 风险评估
-        with st.spinner("正在评估风险..."):
-            risk_result = get_risk_deduction(today, indicator_snapshot)
-            risk_deduction = risk_result.get("deduction", 0)
-        
-        # 5. 最终评分
-        tqqq_final = calculate_final_score(tqqq_base, risk_deduction)
-        sqqq_final = calculate_final_score(sqqq_base, risk_deduction)
-        
-        # 6. 市场状态
-        market_state = classify_overall_market_state(tqqq_final, sqqq_final)
-        summary = generate_market_summary(tqqq_result, sqqq_result, risk_result, 
-                                         {"tqqq": tqqq_final, "sqqq": sqqq_final})
-        
-        # 7. 保存到数据库
-        try:
-            score_record = {
-                "datetime": datetime.now().isoformat(),
-                "tqqq_base_score": tqqq_base,
-                "sqqq_base_score": sqqq_base,
-                "risk_deduction": risk_deduction,
-                "tqqq_final_score": tqqq_final,
-                "sqqq_final_score": sqqq_final,
-                "market_state": market_state,
-                "summary": summary,
-            }
-            save_market_score(score_record)
-        except Exception as e:
-            logger.warning(f"保存评分到数据库失败：{e}")
-        
-        return {
-            "tqqq_base": tqqq_base,
-            "sqqq_base": sqqq_base,
-            "tqqq_final": tqqq_final,
-            "sqqq_final": sqqq_final,
-            "risk_deduction": risk_deduction,
-            "market_state": market_state,
-            "summary": summary,
-            "tqqq_result": tqqq_result,
-            "sqqq_result": sqqq_result,
-            "risk_result": risk_result,
-            "daily_data": daily_data,
-            "intraday_data": intraday_data,
-            "indicator_snapshot": indicator_snapshot,
-            "timestamp": datetime.now(),
-        }
-        
+
+        return result
+
     except Exception as e:
         logger.error(f"数据获取和计算失败：{e}")
         st.error(f"❌ 处理失败：{str(e)}")
         return None
+
+
+def display_data_status(result: dict) -> None:
+    """显示数据来源状态与数据质量。"""
+    st.subheader("🧭 数据状态与可信度")
+
+    data_quality = result.get("data_quality", {})
+    cache_status = result.get("cache_status", {})
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("数据质量分", data_quality.get("quality_score", 0))
+    with col2:
+        st.metric("质量等级", data_quality.get("quality_level", "unknown"))
+    with col3:
+        fallback_count = data_quality.get("cache_fallback_count", 0)
+        st.metric("缓存回退次数", fallback_count)
+
+    records = []
+    for symbol, meta in cache_status.items():
+        if symbol == "QQQ_intraday_5m":
+            name = "QQQ(5m)"
+        else:
+            name = symbol
+        records.append(
+            {
+                "数据": name,
+                "来源": meta.get("source", "none"),
+                "状态": "新鲜" if meta.get("is_fresh", False) else "可能滞后",
+                "说明": meta.get("message", ""),
+            }
+        )
+
+    if records:
+        st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
+
+    missing_symbols = data_quality.get("missing_symbols", [])
+    if missing_symbols:
+        st.warning(f"缺失数据：{', '.join(missing_symbols)}")
+    for warning in data_quality.get("warnings", []):
+        st.info(warning)
 
 
 def display_market_status(result: dict) -> None:
@@ -857,6 +827,9 @@ def main() -> None:
         
         # 如果有结果，显示所有信息
         if result is not None:
+            display_data_status(result)
+            st.markdown("---")
+
             # 显示市场状态
             display_market_status(result)
             st.markdown("---")

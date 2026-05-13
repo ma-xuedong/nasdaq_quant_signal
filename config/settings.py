@@ -1,5 +1,12 @@
 """Central configuration for the TQQQ / SQQQ signal project."""
 
+# Data provider configuration
+DATA_PROVIDER = "yfinance"
+
+# Cache policy (phase 2)
+DAILY_CACHE_MAX_AGE_MINUTES = 30
+INTRADAY_CACHE_MAX_AGE_MINUTES = 5
+
 # Database configuration
 DATABASE_PATH = "data/market_data.db"
 

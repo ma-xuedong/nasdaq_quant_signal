@@ -146,6 +146,23 @@ def init_database(db_path: str | None = None) -> None:
                 created_at TEXT
             )
         """)
+
+        # cache_metadata table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cache_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cache_key TEXT NOT NULL UNIQUE,
+                symbol TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                interval TEXT,
+                provider TEXT,
+                last_updated TEXT,
+                expires_at TEXT,
+                row_count INTEGER,
+                status TEXT,
+                message TEXT
+            )
+        """)
         
         conn.commit()
         logger.info(f"Database initialized: {db_path}")

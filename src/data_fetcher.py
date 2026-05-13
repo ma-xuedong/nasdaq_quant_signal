@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import pandas as pd
-import yfinance as yf
 
+from src.data_provider.provider_factory import get_data_provider
+from src.data_provider.yfinance_provider import normalize_ohlcv_dataframe
 from src.utils import setup_logger
 
 logger = setup_logger("data_fetcher")
@@ -86,23 +86,13 @@ def fetch_daily_data(symbol: str, period: str = "1y") -> pd.DataFrame:
         4. 保证索引或字段中有日期信息；
         5. 统一字段名称，便于后续处理。
     """
-    try:
-        logger.info(f"正在抓取 {symbol} 日线数据（周期：{period}）...")
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period)
-
-        if df.empty:
-            logger.warning(f"{symbol} 返回空数据")
-            return pd.DataFrame()
-
-        df = normalize_ohlcv_dataframe(df, symbol=symbol, is_intraday=False)
-
-        logger.info(f"{symbol} 日线数据获取成功，共 {len(df)} 条。")
-        return df
-
-    except Exception as e:
-        logger.error(f"{symbol} 日线数据获取失败：{str(e)}")
+    provider = get_data_provider()
+    df = provider.get_daily_data(symbol=symbol, period=period)
+    if df is None or df.empty:
+        logger.warning(f"{symbol} 日线数据获取失败")
         return pd.DataFrame()
+    logger.info(f"{symbol} 日线数据获取成功，共 {len(df)} 条。")
+    return df
 
 
 def fetch_intraday_data(
@@ -129,23 +119,13 @@ def fetch_intraday_data(
         4. 注意 yfinance 对 1m 数据周期有限制；
         5. 统一字段名称。
     """
-    try:
-        logger.info(f"正在抓取 {symbol} 分钟线数据（间隔：{interval}, 周期：{period}）...")
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval)
-
-        if df.empty:
-            logger.warning(f"{symbol} {interval} 数据返回空结果")
-            return pd.DataFrame()
-
-        df = normalize_ohlcv_dataframe(df, symbol=symbol, is_intraday=True)
-
-        logger.info(f"{symbol} 分钟线数据获取成功，共 {len(df)} 条。")
-        return df
-
-    except Exception as e:
-        logger.error(f"{symbol} 分钟线数据获取失败：{str(e)}")
+    provider = get_data_provider()
+    df = provider.get_intraday_data(symbol=symbol, interval=interval, period=period)
+    if df is None or df.empty:
+        logger.warning(f"{symbol} {interval} 分钟线数据获取失败")
         return pd.DataFrame()
+    logger.info(f"{symbol} 分钟线数据获取成功，共 {len(df)} 条。")
+    return df
 
 
 def fetch_multiple_daily_data(
@@ -216,43 +196,8 @@ def fetch_latest_price(symbol: str) -> dict[str, Any]:
         "error": "..."
     }
     """
-    try:
-        logger.info(f"正在抓取 {symbol} 最新价格...")
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-
-        price = info.get("currentPrice") or info.get("regularMarketPrice")
-        previous_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
-
-        if price is None:
-            logger.warning(f"{symbol} 无法获取最新价格")
-            return {
-                "symbol": symbol,
-                "price": None,
-                "error": "无法获取最新价格"
-            }
-
-        change = price - previous_close if previous_close else None
-        change_pct = (change / previous_close) if previous_close and previous_close != 0 else None
-
-        result = {
-            "symbol": symbol,
-            "price": price,
-            "previous_close": previous_close,
-            "change": change,
-            "change_pct": change_pct,
-            "source": "yfinance"
-        }
-        logger.info(f"{symbol} 获取成功，当前价格：{price}")
-        return result
-
-    except Exception as e:
-        logger.error(f"{symbol} 价格抓取失败：{str(e)}")
-        return {
-            "symbol": symbol,
-            "price": None,
-            "error": str(e)
-        }
+    provider = get_data_provider()
+    return provider.get_latest_quote(symbol)
 
 
 def fetch_market_snapshot() -> dict[str, dict]:
