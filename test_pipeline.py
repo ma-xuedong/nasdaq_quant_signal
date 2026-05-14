@@ -59,6 +59,8 @@ def test_pipeline_success() -> None:
     assert result["success"] is True
     assert result["is_realtime_usable"] is True
     assert result["is_test_mode"] is False
+    assert "futures_snapshot" in result
+    assert "breadth_snapshot" in result
     for key in [
         "indicator_snapshot",
         "tqqq_result",
@@ -95,6 +97,26 @@ def test_pipeline_fallback_cache_degrades_signal() -> None:
     assert result["is_realtime_usable"] is False
     assert result["final_scores"]["tqqq_final_score"] < 75
     assert "fallback_cache" in result["summary"]
+
+
+def test_pipeline_futures_and_breadth_degrade_without_crash() -> None:
+    def fake_daily(symbol: str, **kwargs):
+        if symbol in {"NQ=F", "ES=F", "AAPL", "MSFT", "NVDA", "AMZN"}:
+            return pd.DataFrame(), {"source": "missing", "is_fresh": False, "is_fallback": False}
+        return _sample_daily(symbol), {"source": "api", "is_fresh": True, "is_fallback": False}
+
+    def fake_intraday(symbol: str, **kwargs):
+        return _sample_intraday(symbol), {"source": "api", "is_fresh": True, "is_fallback": False}
+
+    with patch("src.pipeline.get_daily_data_with_cache", side_effect=fake_daily), patch(
+        "src.pipeline.get_intraday_data_with_cache", side_effect=fake_intraday
+    ), patch("src.pipeline.sleep_between_requests", return_value=None):
+        result = run_signal_pipeline(save_to_db=False, use_cache=True)
+
+    assert result["success"] is True
+    assert result["futures_snapshot"]["available"] is False
+    assert result["breadth_snapshot"]["available"] is False
+    assert result["data_quality"]["quality_score"] < 100
 
 
 def test_pipeline_fail_when_qqq_missing() -> None:
@@ -139,6 +161,7 @@ def test_pipeline_mock_mode_blocks_real_signal() -> None:
 def main() -> None:
     test_pipeline_success()
     test_pipeline_fallback_cache_degrades_signal()
+    test_pipeline_futures_and_breadth_degrade_without_crash()
     test_pipeline_fail_when_qqq_missing()
     test_pipeline_mock_mode_blocks_real_signal()
     print("test_pipeline passed")

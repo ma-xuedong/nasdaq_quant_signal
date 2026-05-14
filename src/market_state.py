@@ -111,7 +111,9 @@ def generate_market_summary(
     tqqq_result: dict,
     sqqq_result: dict,
     risk_result: dict,
-    final_scores: dict
+    final_scores: dict,
+    futures_snapshot: dict | None = None,
+    breadth_snapshot: dict | None = None,
 ) -> str:
     """
     生成中文市场解释。
@@ -195,6 +197,33 @@ def generate_market_summary(
                     summary_lines.append(f"  ⚠ {warning}")
         else:
             summary_lines.append("  ✓ 所有数据完整")
+        summary_lines.append("")
+
+        summary_lines.append("【期货确认】")
+        futures_snapshot = futures_snapshot or {}
+        if futures_snapshot.get("available"):
+            nq_vs_es = futures_snapshot.get("nq_vs_es", 0)
+            direction = "偏多" if nq_vs_es > 0 else "偏空" if nq_vs_es < 0 else "不明"
+            summary_lines.append(
+                f"  NQ 当前 {'强于' if nq_vs_es > 0 else '弱于' if nq_vs_es < 0 else '接近'} ES，期货方向 {direction}。"
+            )
+            summary_lines.append(
+                f"  NQ 涨跌幅 {futures_snapshot.get('nq_return', 0)*100:.2f}%，相对 ES 强弱 {nq_vs_es*100:.2f}%。"
+            )
+        else:
+            summary_lines.append("  NQ/ES 数据缺失，期货确认模块降级。")
+        summary_lines.append("")
+
+        summary_lines.append("【市场宽度】")
+        breadth_snapshot = breadth_snapshot or {}
+        if breadth_snapshot.get("available"):
+            summary_lines.append(
+                f"  Nasdaq-100 内部上涨比例为 {breadth_snapshot.get('up_ratio', 0)*100:.0f}%，"
+                f"站上 MA20 比例为 {breadth_snapshot.get('above_ma20_ratio', 0)*100:.0f}%，"
+                f"宽度状态为 {breadth_snapshot.get('breadth_status', 'unknown')}。"
+            )
+        else:
+            summary_lines.append("  市场宽度可用成分股不足，宽度判断可信度下降。")
         summary_lines.append("")
 
         # 6. 结论

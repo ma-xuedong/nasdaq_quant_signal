@@ -5,11 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 
 from config.settings import (
+    BREADTH_MIN_REQUIRED_SYMBOLS,
     DATABASE_PATH,
     FUTURES_SYMBOLS,
+    MAX_BREADTH_SYMBOLS,
     MEGA_CAP_TECH_SYMBOLS,
     VOLATILITY_SYMBOLS,
 )
+from config.nasdaq100_symbols import NASDAQ100_SYMBOLS
+from src.breadth import build_breadth_snapshot
 from src.cache import (
     get_daily_data_with_cache,
     get_intraday_data_with_cache,
@@ -17,6 +21,7 @@ from src.cache import (
 )
 from src.data_quality import assess_data_quality
 from src.database import init_database, save_indicator_daily, save_market_score
+from src.futures import build_futures_snapshot
 from src.indicators import build_full_indicator_dataframe, build_indicator_snapshot
 from src.market_state import classify_overall_market_state, generate_market_summary
 from src.risk_filter import get_risk_deduction
@@ -43,6 +48,26 @@ SYMBOL_BATCHES = [
 def _cap_signal_scores(tqqq_score: float, sqqq_score: float, max_score: float) -> tuple[float, float]:
     """Cap effective scores so guardrails can suppress strong conclusions."""
     return min(float(tqqq_score), max_score), min(float(sqqq_score), max_score)
+
+
+def _refresh_quality_labels(data_quality: dict) -> dict:
+    """Recalculate quality bands after pipeline-level adjustments."""
+    score = max(0, min(100, float(data_quality.get("quality_score", 0) or 0)))
+    data_quality["quality_score"] = score
+
+    if score >= 85:
+        data_quality["quality_level"] = "high"
+        data_quality["confidence"] = "high"
+    elif score >= 70:
+        data_quality["quality_level"] = "medium"
+        data_quality["confidence"] = "medium"
+    elif score >= 50:
+        data_quality["quality_level"] = "low"
+        data_quality["confidence"] = "low"
+    else:
+        data_quality["quality_level"] = "poor"
+        data_quality["confidence"] = "very_low"
+    return data_quality
 
 
 def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict:
@@ -120,6 +145,48 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
 
     indicator_snapshot = build_indicator_snapshot(daily_data, intraday_data)
 
+    qqq_atr = indicator_snapshot.get("qqq", {}).get("atr14")
+    qqq_price = indicator_snapshot.get("qqq", {}).get("price")
+    qqq_atr_pct = None
+    if qqq_atr not in {None, 0} and qqq_price not in {None, 0}:
+        qqq_atr_pct = float(qqq_atr) / float(qqq_price)
+
+    futures_snapshot = build_futures_snapshot(
+        futures_data={
+            FUTURES_SYMBOLS["NQ"]: daily_data.get(FUTURES_SYMBOLS["NQ"], None),
+            FUTURES_SYMBOLS["ES"]: daily_data.get(FUTURES_SYMBOLS["ES"], None),
+            FUTURES_SYMBOLS["MNQ"]: daily_data.get(FUTURES_SYMBOLS["MNQ"], None),
+            FUTURES_SYMBOLS["MES"]: daily_data.get(FUTURES_SYMBOLS["MES"], None),
+        },
+        qqq_atr_pct=qqq_atr_pct,
+        data_source_status=data_source_status,
+    )
+
+    breadth_symbols = NASDAQ100_SYMBOLS[:MAX_BREADTH_SYMBOLS]
+    breadth_snapshot = build_breadth_snapshot(
+        symbol_data={symbol: daily_data.get(symbol) for symbol in breadth_symbols},
+        min_required_symbols=min(BREADTH_MIN_REQUIRED_SYMBOLS, len(breadth_symbols)),
+    )
+
+    if len(breadth_symbols) < len(NASDAQ100_SYMBOLS):
+        breadth_snapshot.setdefault("warnings", []).append("当前仅使用部分 Nasdaq-100 成分股计算市场宽度。")
+
+    if not futures_snapshot.get("available", False):
+        warnings.extend(futures_snapshot.get("warnings", []))
+
+    if not breadth_snapshot.get("available", False):
+        warnings.extend(breadth_snapshot.get("warnings", []))
+        warnings.append("市场宽度模块降级，可继续使用原有 QQQE / 科技权重股逻辑。")
+        data_quality["quality_score"] = max(0, float(data_quality.get("quality_score", 0) or 0) - 10)
+        data_quality["breadth_available"] = False
+    else:
+        warnings.extend(breadth_snapshot.get("warnings", []))
+        data_quality["breadth_available"] = True
+
+    data_quality = _refresh_quality_labels(data_quality)
+    indicator_snapshot["futures_snapshot"] = futures_snapshot
+    indicator_snapshot["breadth_snapshot"] = breadth_snapshot
+
     tqqq_result = calculate_tqqq_score(indicator_snapshot)
     sqqq_result = calculate_sqqq_score(indicator_snapshot)
 
@@ -164,7 +231,14 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
         market_state = "观察（弱参考）"
 
     final_scores = {"tqqq": effective_tqqq_final, "sqqq": effective_sqqq_final}
-    summary = generate_market_summary(tqqq_result, sqqq_result, risk_result, final_scores)
+    summary = generate_market_summary(
+        tqqq_result,
+        sqqq_result,
+        risk_result,
+        final_scores,
+        futures_snapshot=futures_snapshot,
+        breadth_snapshot=breadth_snapshot,
+    )
 
     if is_test_mode:
         summary = "当前为模拟数据，仅用于开发测试，不可用于真实交易判断。\n\n" + summary
@@ -214,6 +288,8 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
         "is_realtime_usable": is_realtime_usable,
         "is_test_mode": is_test_mode,
         "indicator_snapshot": indicator_snapshot,
+        "futures_snapshot": futures_snapshot,
+        "breadth_snapshot": breadth_snapshot,
         "tqqq_result": tqqq_result,
         "sqqq_result": sqqq_result,
         "risk_result": risk_result,

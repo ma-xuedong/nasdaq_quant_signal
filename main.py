@@ -56,6 +56,32 @@ def print_data_source_status(data_source_status: dict[str, dict]) -> None:
         )
 
 
+def print_futures_and_breadth(result: dict) -> None:
+    """Print futures confirmation and breadth summary from pipeline output."""
+    futures_snapshot = result.get("futures_snapshot", {})
+    breadth_snapshot = result.get("breadth_snapshot", {})
+
+    print_section("Futures")
+    if futures_snapshot:
+        print(
+            f"NQ vs ES: {safe_get_number(futures_snapshot, 'nq_vs_es'):.4f}, "
+            f"trend={futures_snapshot.get('nq_trend', {}).get('trend', 'unknown')}, "
+            f"available={futures_snapshot.get('available', False)}"
+        )
+    else:
+        print("Futures snapshot unavailable")
+
+    print_section("Breadth")
+    if breadth_snapshot:
+        print(
+            f"up_ratio={safe_get_number(breadth_snapshot, 'up_ratio'):.2f}, "
+            f"down_ratio={safe_get_number(breadth_snapshot, 'down_ratio'):.2f}, "
+            f"status={breadth_snapshot.get('breadth_status', 'unknown')}"
+        )
+    else:
+        print("Breadth snapshot unavailable")
+
+
 def main() -> None:
     """Run the main signal pipeline and print a console report."""
     print("====== TQQQ / SQQQ Signal Report ======")
@@ -93,6 +119,8 @@ def main() -> None:
     print(f"TQQQ Final Score: {tqqq_score:.2f}")
     print(f"SQQQ Final Score: {sqqq_score:.2f}")
     print(f"Market State: {result.get('market_state', '未知')}")
+
+    print_futures_and_breadth(result)
 
     print_section("Data Quality")
     print(

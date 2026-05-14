@@ -58,6 +58,26 @@ def create_bullish_snapshot() -> dict:
                 "description": "强势开盘：预示向上",
             },
         },
+        "futures_snapshot": {
+            "available": True,
+            "nq_return": 0.012,
+            "es_return": 0.006,
+            "nq_vs_es": 0.006,
+            "nq_stronger_than_es": True,
+            "nq_weaker_than_es": False,
+            "nq_trend": {"trend": "up"},
+            "gap_vs_atr": 0.9,
+            "warnings": [],
+        },
+        "breadth_snapshot": {
+            "available": True,
+            "up_ratio": 0.72,
+            "down_ratio": 0.20,
+            "above_ma20_ratio": 0.68,
+            "above_ma50_ratio": 0.61,
+            "breadth_status": "strong",
+            "warnings": [],
+        },
     }
 
 
@@ -110,7 +130,34 @@ def create_bearish_snapshot() -> dict:
                 "description": "弱势开盘：预示向下",
             },
         },
+        "futures_snapshot": {
+            "available": True,
+            "nq_return": -0.018,
+            "es_return": -0.005,
+            "nq_vs_es": -0.013,
+            "nq_stronger_than_es": False,
+            "nq_weaker_than_es": True,
+            "nq_trend": {"trend": "down"},
+            "gap_vs_atr": 1.1,
+            "warnings": [],
+        },
+        "breadth_snapshot": {
+            "available": True,
+            "up_ratio": 0.18,
+            "down_ratio": 0.74,
+            "above_ma20_ratio": 0.28,
+            "above_ma50_ratio": 0.22,
+            "breadth_status": "weak",
+            "warnings": [],
+        },
     }
+
+
+def create_neutral_snapshot() -> dict:
+    snapshot = create_bullish_snapshot()
+    snapshot["futures_snapshot"] = {"available": False, "warnings": ["期货缺失"]}
+    snapshot["breadth_snapshot"] = {"available": False, "warnings": ["宽度缺失"]}
+    return snapshot
 
 
 def test_tqqq_bullish():
@@ -125,6 +172,8 @@ def test_tqqq_bullish():
     module_scores = result.get("module_scores", {})
     assert module_scores.get("trend", 0) >= 15, "Trend should score high in bullish"
     assert module_scores.get("mega_cap_tech", 0) == 10, "All tech stocks up"
+    assert module_scores.get("futures", 0) >= 10, "Futures should add bullish confirmation"
+    assert module_scores.get("breadth", 0) >= 10, "Breadth should add bullish confirmation"
     
     print(f"✓ TQQQ Bullish: {base_score:.0f} points")
 
@@ -141,6 +190,8 @@ def test_sqqq_bearish():
     module_scores = result.get("module_scores", {})
     assert module_scores.get("breakdown", 0) >= 15, "Breakdown should score high"
     assert module_scores.get("mega_cap_tech", 0) == 10, "Most tech stocks down"
+    assert module_scores.get("weakness", 0) >= 12, "Futures weakness should score high"
+    assert module_scores.get("breadth", 0) >= 10, "Breadth weakness should score high"
     
     print(f"✓ SQQQ Bearish: {base_score:.0f} points")
 
@@ -273,6 +324,18 @@ def test_bullish_vs_bearish():
     print(f"✓ Bearish: SQQQ {sqqq_bearish:.0f} > TQQQ {tqqq_bearish:.0f}")
 
 
+def test_futures_and_breadth_increase_scores() -> None:
+    print("Testing Futures and Breadth Impact...")
+    bullish = create_bullish_snapshot()
+    neutral = create_neutral_snapshot()
+    bearish = create_bearish_snapshot()
+
+    assert calculate_tqqq_score(bullish).get("base_score", 0) > calculate_tqqq_score(neutral).get("base_score", 0)
+    assert calculate_sqqq_score(bearish).get("base_score", 0) > calculate_sqqq_score(neutral).get("base_score", 0)
+
+    print("✓ Futures and breadth affect scores as expected")
+
+
 def main():
     """Run all tests."""
     print("====== Scoring & Risk Filter Unit Tests ======\n")
@@ -285,6 +348,7 @@ def main():
     test_overall_market_state()
     test_risk_deduction()
     test_bullish_vs_bearish()
+    test_futures_and_breadth_increase_scores()
     
     print("\n====== All Tests Passed ======\n")
 

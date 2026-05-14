@@ -126,6 +126,20 @@ def render_signal_details(result: dict) -> None:
         st.json(result.get("risk_result", {}))
 
 
+def render_futures_breadth(result: dict) -> None:
+    """Render futures and breadth snapshots from pipeline output."""
+    futures_snapshot = result.get("futures_snapshot", {})
+    breadth_snapshot = result.get("breadth_snapshot", {})
+
+    col1, col2 = st.columns(2)
+    with col1:
+        with st.expander("期货确认", expanded=False):
+            st.json(futures_snapshot)
+    with col2:
+        with st.expander("市场宽度", expanded=False):
+            st.json(breadth_snapshot)
+
+
 def render_indicator_snapshot(result: dict) -> None:
     """Render indicator snapshot if available."""
     snapshot = result.get("indicator_snapshot", {})
@@ -171,6 +185,7 @@ render_runtime_banner(result)
 render_score_cards(result)
 render_warnings(result.get("warnings", []))
 render_signal_details(result)
+render_futures_breadth(result)
 render_data_quality(result)
 render_indicator_snapshot(result)
 

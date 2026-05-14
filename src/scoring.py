@@ -10,6 +10,14 @@ from src.utils import setup_logger
 logger = setup_logger("scoring")
 
 
+def _get_futures_snapshot(snapshot: dict) -> dict:
+    return snapshot.get("futures_snapshot", {}) or {}
+
+
+def _get_breadth_snapshot(snapshot: dict) -> dict:
+    return snapshot.get("breadth_snapshot", {}) or {}
+
+
 def calculate_tqqq_score(indicator_snapshot: dict) -> dict:
     """
     计算 TQQQ 做多基础评分（满分100分）。
@@ -142,43 +150,38 @@ def _score_tqqq_trend(snapshot: dict, reasons: list, warnings: list) -> float:
 
 
 def _score_tqqq_futures(snapshot: dict, reasons: list, warnings: list) -> float:
-    """TQQQ期货确认：15分（第一版使用替代逻辑）。"""
+    """TQQQ期货确认：15分。"""
     score = 0
-    qqq = snapshot.get("qqq", {})
-
-    if not qqq:
-        return 0
+    futures = _get_futures_snapshot(snapshot)
 
     try:
-        daily_return = qqq.get("daily_return", 0)
+        if not futures.get("available"):
+            warnings.extend(futures.get("warnings", []))
+            warnings.append("期货确认模块降级，TQQQ 期货加分受限。")
+            return 0
 
-        # QQQ 当日涨幅 > 0：+5
-        if daily_return > 0:
+        nq_return = futures.get("nq_return", 0)
+        nq_vs_es = futures.get("nq_vs_es", 0)
+        nq_trend = futures.get("nq_trend", {})
+        gap_vs_atr = futures.get("gap_vs_atr", 0)
+
+        if nq_return > 0:
             score += 5
-            reasons.append(f"QQQ 当日上涨 {daily_return*100:.2f}%。")
-        else:
-            reasons.append(f"QQQ 当日下跌 {daily_return*100:.2f}%。")
-
-        # QQQ 当日涨幅 > 0.5%：额外 +3
-        if daily_return > 0.005:
-            score += 3
-            reasons.append(f"QQQ 涨幅超过 0.5%，表现强势。")
-
-        # QQQ 强于 SPY：+5
-        qqq_vs_spy = snapshot.get("relative_strength", {}).get("qqq_vs_spy", 0)
-        if qqq_vs_spy > 0:
-            score += 5
-            reasons.append(f"QQQ 相对 SPY 强势 {qqq_vs_spy:.4f}，科技相对大盘表现好。")
-        else:
-            reasons.append(f"QQQ 相对 SPY 弱势 {qqq_vs_spy:.4f}。")
-
-        # 盘前趋势稳定上行：+2（简化处理）
-        if daily_return > 0.002:
+            reasons.append(f"NQ 期货上涨 {nq_return*100:.2f}%，盘前偏多。")
+        if nq_vs_es > 0:
+            score += 4
+            reasons.append(f"NQ 相对 ES 强势 {nq_vs_es*100:.2f}%，成长风格占优。")
+        if nq_trend.get("trend") == "up":
+            score += 4
+            reasons.append("NQ 短线趋势向上，期货确认偏多。")
+        if 0 < gap_vs_atr <= 1.5:
             score += 2
-            reasons.append("盘前及日内趋势稳定向上。")
+        elif gap_vs_atr > 1.5:
+            warnings.append(f"NQ 缺口相对 QQQ ATR 偏大 ({gap_vs_atr:.2f})，追涨需谨慎。")
 
     except Exception as e:
         logger.warning(f"期货模块计算失败：{str(e)}")
+        warnings.append(f"期货模块计算异常：{str(e)}")
 
     return min(score, 15)
 
@@ -209,13 +212,28 @@ def _score_tqqq_breadth(snapshot: dict, reasons: list, warnings: list) -> float:
     score = 0
 
     try:
+        breadth = _get_breadth_snapshot(snapshot)
         qqq = snapshot.get("qqq", {})
         rel_strength = snapshot.get("relative_strength", {})
+
+        if breadth.get("available"):
+            if breadth.get("breadth_status") == "strong":
+                score += 5
+                reasons.append(
+                    f"Nasdaq-100 宽度强劲，上涨比例 {breadth.get('up_ratio', 0)*100:.0f}%，内部结构健康。"
+                )
+            if breadth.get("up_ratio", 0) >= 0.60:
+                score += 3
+            if breadth.get("above_ma20_ratio", 0) >= 0.60:
+                score += 2
+        else:
+            warnings.extend(breadth.get("warnings", []))
+            warnings.append("市场宽度模块降级，回退至 QQQE / 权重股逻辑。")
 
         # QQQE 涨幅接近或强于 QQQ：+6
         qqqe_vs_qqq = rel_strength.get("qqqe_vs_qqq", 0)
         if qqqe_vs_qqq >= 0:
-            score += 6
+            score += 3
             reasons.append(f"QQQE 相对 QQQ 强势或相当 {qqqe_vs_qqq:.4f}，市场宽度良好。")
         else:
             reasons.append(f"QQQE 相对 QQQ 弱势 {qqqe_vs_qqq:.4f}。")
@@ -224,7 +242,7 @@ def _score_tqqq_breadth(snapshot: dict, reasons: list, warnings: list) -> float:
         tech = snapshot.get("mega_cap_tech", {})
         tech_up = tech.get("up_count", 0)
         if tech_up >= 6:
-            score += 6
+            score += 3
             reasons.append(f"权重科技股中 {tech_up} 只上涨，市场人气良好。")
         elif tech_up >= 4:
             reasons.append(f"权重科技股中 {tech_up} 只上涨，表现一般。")
@@ -234,7 +252,7 @@ def _score_tqqq_breadth(snapshot: dict, reasons: list, warnings: list) -> float:
         # QQQ 成交量不异常萎缩：+3
         volume_ratio = qqq.get("volume_ratio", 1.0)
         if volume_ratio >= 0.8:
-            score += 3
+            score += 2
             reasons.append(f"QQQ 成交量比例 {volume_ratio:.2f}x，成交量充足。")
         else:
             reasons.append(f"QQQ 成交量比例 {volume_ratio:.2f}x，成交量不足。")
@@ -430,37 +448,33 @@ def _score_sqqq_breakdown(snapshot: dict, reasons: list, warnings: list) -> floa
 def _score_sqqq_weakness(snapshot: dict, reasons: list, warnings: list) -> float:
     """SQQQ期货走弱：20分。"""
     score = 0
-    qqq = snapshot.get("qqq", {})
-
-    if not qqq:
-        return 0
+    futures = _get_futures_snapshot(snapshot)
 
     try:
-        daily_return = qqq.get("daily_return", 0)
+        if not futures.get("available"):
+            warnings.extend(futures.get("warnings", []))
+            warnings.append("期货确认模块降级，SQQQ 期货加分受限。")
+            return 0
 
-        # QQQ 当日下跌：+6
-        if daily_return < 0:
-            score += 6
-            reasons.append(f"QQQ 当日下跌 {daily_return*100:.2f}%。")
+        nq_return = futures.get("nq_return", 0)
+        nq_vs_es = futures.get("nq_vs_es", 0)
+        nq_trend = futures.get("nq_trend", {})
 
-        # QQQ 当日跌幅超过 0.5%：额外 +4
-        if daily_return < -0.005:
-            score += 4
-            reasons.append(f"QQQ 跌幅超过 0.5%，下跌力度强。")
-
-        # QQQ 弱于 SPY：+7
-        qqq_vs_spy = snapshot.get("relative_strength", {}).get("qqq_vs_spy", 0)
-        if qqq_vs_spy < 0:
+        if nq_return < 0:
             score += 7
-            reasons.append(f"QQQ 相对 SPY 弱势 {abs(qqq_vs_spy):.4f}，科技相对大盘表现差。")
-
-        # 盘前趋势持续走弱：+3（简化处理）
-        if daily_return < -0.002:
-            score += 3
-            reasons.append("盘前及日内趋势持续走弱。")
+            reasons.append(f"NQ 期货下跌 {abs(nq_return)*100:.2f}%，盘前偏空。")
+        if nq_vs_es < 0:
+            score += 6
+            reasons.append(f"NQ 相对 ES 弱势 {abs(nq_vs_es)*100:.2f}%，成长板块走弱。")
+        if nq_trend.get("trend") == "down":
+            score += 5
+            reasons.append("NQ 短线趋势向下，期货确认偏空。")
+        if futures.get("gap_vs_atr", 0) > 1.5:
+            warnings.append(f"NQ 缺口相对 QQQ ATR 偏大 ({futures.get('gap_vs_atr', 0):.2f})，注意波动放大。")
 
     except Exception as e:
         logger.warning(f"弱势模块计算失败：{str(e)}")
+        warnings.append(f"弱势模块计算异常：{str(e)}")
 
     return min(score, 20)
 
@@ -486,27 +500,42 @@ def _score_sqqq_breadth(snapshot: dict, reasons: list, warnings: list) -> float:
     score = 0
 
     try:
+        breadth = _get_breadth_snapshot(snapshot)
         qqq = snapshot.get("qqq", {})
         rel_strength = snapshot.get("relative_strength", {})
+
+        if breadth.get("available"):
+            if breadth.get("breadth_status") == "weak":
+                score += 5
+                reasons.append(
+                    f"Nasdaq-100 宽度偏弱，下跌比例 {breadth.get('down_ratio', 0)*100:.0f}%，内部走弱明显。"
+                )
+            if breadth.get("down_ratio", 0) >= 0.60:
+                score += 3
+            if breadth.get("above_ma20_ratio", 0) < 0.40:
+                score += 2
+        else:
+            warnings.extend(breadth.get("warnings", []))
+            warnings.append("市场宽度模块降级，SQQQ 回退至 QQQE / 权重股弱势逻辑。")
 
         # QQQE 弱于 QQQ：+5
         qqqe_vs_qqq = rel_strength.get("qqqe_vs_qqq", 0)
         if qqqe_vs_qqq < 0:
-            score += 5
+            score += 2
             reasons.append(f"QQQE 相对 QQQ 弱势 {abs(qqqe_vs_qqq):.4f}，市场宽度恶化。")
 
         # 权重科技股多数下跌：+7
         tech = snapshot.get("mega_cap_tech", {})
         tech_down = tech.get("down_count", 0)
         if tech_down >= 6:
-            score += 7
+            score += 4
             reasons.append(f"权重科技股中 {tech_down} 只下跌，市场人气低迷。")
 
         # QQQ 下跌且成交量放大：+3
         daily_return = qqq.get("daily_return", 0)
         volume_ratio = qqq.get("volume_ratio", 1.0)
         if daily_return < 0 and volume_ratio > 1.2:
-            score += 3
+            score += 2
             reasons.append(f"QQQ 下跌且成交量放大 {volume_ratio:.2f}x，下跌力度强。")
 
     except Exception as e:
