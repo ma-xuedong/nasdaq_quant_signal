@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
-from config.settings import RISK_DISCLOSURE
+from config.settings import CORE_REALTIME_SYMBOLS, RISK_DISCLOSURE
 from src.pipeline import run_signal_pipeline
 
 
@@ -29,6 +30,22 @@ def render_warnings(warnings: list[str]) -> None:
     st.warning("当前存在以下提示：")
     for warning in warnings:
         st.write(f"- {warning}")
+
+
+def render_runtime_banner(result: dict) -> None:
+    """Render high-priority runtime status banners."""
+    data_quality = result.get("data_quality", {})
+
+    if result.get("is_test_mode", False):
+        st.error("测试数据，不可用于真实交易。")
+    if not result.get("is_realtime_usable", False):
+        st.warning("当前不满足实时/准实时判断条件，不能输出强交易建议。")
+
+    quality_score = float(data_quality.get("quality_score", 0) or 0)
+    if quality_score < 50:
+        st.error("数据质量不足，不建议交易。")
+    elif quality_score < 70:
+        st.warning("数据质量一般，仅作弱参考，不建议重仓。")
 
 
 def render_score_cards(result: dict) -> None:
@@ -57,14 +74,40 @@ def render_score_cards(result: dict) -> None:
 def render_data_quality(result: dict) -> None:
     """Render data quality and cache status."""
     data_quality = result.get("data_quality", {})
-    cache_status = result.get("cache_status", {})
+    data_source_status = result.get("data_source_status", {})
+
+    rows = []
+    for key in CORE_REALTIME_SYMBOLS + ["QQQ_intraday_5m"]:
+        meta = data_source_status.get(key, {})
+        rows.append(
+            {
+                "symbol": key,
+                "source": meta.get("source", "missing"),
+                "fresh": meta.get("is_fresh", False),
+                "fallback_cache": meta.get("is_fallback", False),
+                "used_cache": meta.get("used_cache", False),
+                "last_updated": meta.get("last_updated", ""),
+                "data_timestamp": meta.get("data_timestamp", ""),
+                "message": meta.get("message", ""),
+            }
+        )
 
     with st.expander("数据质量与缓存状态", expanded=False):
+        st.subheader("运行状态")
+        status_col1, status_col2, status_col3, status_col4 = st.columns(4)
+        status_col1.metric("数据质量等级", data_quality.get("quality_level", "unknown"))
+        status_col2.metric("质量分", f"{float(data_quality.get('quality_score', 0) or 0):.0f}")
+        status_col3.metric("实时可用", "是" if result.get("is_realtime_usable", False) else "否")
+        status_col4.metric("测试模式", "是" if result.get("is_test_mode", False) else "否")
+
+        st.subheader("核心标的数据来源")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
         st.subheader("数据质量")
         st.json(data_quality)
 
-        st.subheader("缓存状态")
-        st.json(cache_status)
+        st.subheader("完整数据源状态")
+        st.json(data_source_status)
 
 
 def render_signal_details(result: dict) -> None:
@@ -118,11 +161,13 @@ if not isinstance(result, dict):
 
 if not result.get("success", False):
     st.error("信号流程执行失败。")
+    render_runtime_banner(result)
     render_warnings(result.get("warnings", []))
     st.warning(RISK_DISCLOSURE)
     st.stop()
 
 
+render_runtime_banner(result)
 render_score_cards(result)
 render_warnings(result.get("warnings", []))
 render_signal_details(result)

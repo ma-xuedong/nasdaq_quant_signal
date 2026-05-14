@@ -10,6 +10,10 @@ import pandas as pd
 class BaseDataProvider(ABC):
     """行情数据源抽象基类。"""
 
+    def is_test_mode(self) -> bool:
+        """Whether this provider produces synthetic test data."""
+        return False
+
     @abstractmethod
     def get_daily_data(self, symbol: str, period: str = "1y") -> pd.DataFrame:
         """获取日线行情。"""

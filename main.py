@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from config.settings import RISK_DISCLOSURE
+from config.settings import CORE_REALTIME_SYMBOLS, RISK_DISCLOSURE
 from src.pipeline import run_signal_pipeline
 
 
@@ -34,6 +34,28 @@ def safe_get_number(data: dict[str, Any], key: str, default: float = 0.0) -> flo
         return default
 
 
+def print_data_source_status(data_source_status: dict[str, dict]) -> None:
+    """Print source, freshness and timestamps for core symbols."""
+    if not data_source_status:
+        return
+
+    print_section("Data Source Status")
+    keys = CORE_REALTIME_SYMBOLS + ["QQQ_intraday_5m"]
+    for key in keys:
+        meta = data_source_status.get(key, {})
+        if not meta:
+            print(f"{key}: source=missing")
+            continue
+
+        print(
+            f"{key}: source={meta.get('source', 'missing')}, "
+            f"fresh={meta.get('is_fresh', False)}, "
+            f"fallback={meta.get('is_fallback', False)}, "
+            f"last_updated={meta.get('last_updated', '') or '-'}, "
+            f"data_timestamp={meta.get('data_timestamp', '') or '-'}"
+        )
+
+
 def main() -> None:
     """Run the main signal pipeline and print a console report."""
     print("====== TQQQ / SQQQ Signal Report ======")
@@ -46,8 +68,16 @@ def main() -> None:
         print(RISK_DISCLOSURE)
         return
 
+    print_data_source_status(result.get("data_source_status", {}))
+
+    print_section("Runtime Flags")
+    print(f"Realtime Usable: {result.get('is_realtime_usable', False)}")
+    print(f"Test Mode: {result.get('is_test_mode', False)}")
+
     if not result.get("success", False):
         print("信号流程执行失败。")
+        print_section("Data Quality")
+        print(result.get("data_quality", {}))
         print_warnings(result.get("warnings", []))
         print()
         print(RISK_DISCLOSURE)
@@ -69,6 +99,8 @@ def main() -> None:
         f"Quality: {data_quality.get('quality_level', 'unknown')} "
         f"({safe_get_number(data_quality, 'quality_score'):.2f})"
     )
+    print(f"Realtime Usable: {result.get('is_realtime_usable', False)}")
+    print(f"Test Mode: {result.get('is_test_mode', False)}")
 
     missing_symbols = data_quality.get("missing_symbols", [])
     if missing_symbols:

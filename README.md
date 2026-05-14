@@ -16,6 +16,7 @@ TQQQ / SQQQ 纳指量化信号辅助系统。
 ✓ **可视化面板**：Streamlit 本地 Web 界面，实时展示市场状态和历史分析
 ✓ **持久化存储**：SQLite 数据库保存历史评分、市场数据和回测结果
 ✓ **完善的错误处理**：网络故障、数据缺失等场景的优雅降级
+✓ **数据来源与实时性控制**：标记 api/cache/fallback_cache/mock/missing，并控制强信号输出
 
 ## 当前阶段
 
@@ -193,6 +194,8 @@ nasdaq_quant_signal/
 - cache 过期后请求 API
 - API 失败时回退 fallback_cache
 - 使用 `cache_metadata` 维护缓存状态
+- 每个 symbol 返回 `source`、`last_updated`、`data_timestamp`、`is_fresh`
+- `fallback_cache` 仅用于降级展示，不应作为强交易信号依据
 
 ### 1.3 限流与重试（src/rate_limiter.py）
 
@@ -217,6 +220,33 @@ nasdaq_quant_signal/
 - `confidence`
 - `missing_symbols`
 - `cache_fallback_count`
+- `is_realtime_usable`
+- `is_test_mode`
+
+## 数据质量与实时性判断
+
+正式运行以真实/准实时行情为核心，当前默认 provider 为 `yfinance`。系统会对每个 symbol 标记以下来源之一：
+
+- `api`：本次成功从真实数据源获取
+- `cache`：命中未过期缓存
+- `fallback_cache`：API 失败后退回最近缓存，仅可观察
+- `missing`：当前无可用数据
+- `mock`：测试数据，仅用于开发测试
+
+关键约束：
+
+- `QQQ` 缺失时，统一信号流程返回 `success=False`
+- `QQQ` 仅有 `fallback_cache` 时，可继续展示，但只能输出“观察/数据可能滞后”
+- `QQQ` 不满足实时/准实时条件时，不允许输出强多/强空结论
+- `quality_score < 50` 时，结论固定为“数据质量不足，不建议交易”
+- `50 <= quality_score < 70` 时，仅作弱参考，不建议重仓
+- `DATA_PROVIDER=mock` 时，系统进入测试模式，摘要会明确提示“不可用于真实交易判断”
+
+说明：
+
+- `yfinance` 适合原型与研究，但可能遇到限流、代理、网络失败等问题
+- 后续可在 `src/data_provider/` 下扩展 Finnhub、Tiingo、Polygon、IBKR provider
+- Mock provider 只用于开发测试，不参与正式交易判断
 
 ### 2. 技术指标（src/indicators.py）
 

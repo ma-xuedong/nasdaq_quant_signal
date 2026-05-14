@@ -39,6 +39,86 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return None
 
 
+def _serialize_datetime(value) -> str:
+    """Serialize pandas/python datetime-like values to UTC ISO string."""
+    if value is None or pd.isna(value):
+        return ""
+
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(timezone.utc)
+    else:
+        timestamp = timestamp.tz_convert(timezone.utc)
+    return timestamp.isoformat()
+
+
+def _get_dataframe_timestamp(df: pd.DataFrame, is_intraday: bool) -> str:
+    """Read latest timestamp from normalized OHLCV dataframe."""
+    if df is None or df.empty:
+        return ""
+
+    column = "datetime" if is_intraday else "date"
+    if column not in df.columns:
+        return ""
+
+    series = pd.to_datetime(df[column], errors="coerce").dropna()
+    if series.empty:
+        return ""
+    return _serialize_datetime(series.max())
+
+
+def _get_age_minutes(timestamp_value: str) -> float | None:
+    """Return age in minutes for an ISO timestamp."""
+    parsed = _parse_datetime(timestamp_value)
+    if parsed is None:
+        return None
+    return round((_now_utc() - parsed).total_seconds() / 60.0, 2)
+
+
+def _resolve_success_source(provider, metadata: dict, default_source: str) -> str:
+    """Map a successful fetch/cache hit to a public source label."""
+    provider_name = metadata.get("provider") or provider.get_provider_name()
+    if provider.is_test_mode() or provider_name == "mock":
+        return "mock"
+    return default_source
+
+
+def _build_meta(
+    *,
+    symbol: str,
+    source: str,
+    provider,
+    cache_key: str,
+    df: pd.DataFrame,
+    message: str,
+    last_updated: str,
+    is_fresh: bool,
+    is_fallback: bool,
+    interval: str | None = None,
+) -> dict:
+    """Build a normalized metadata payload for each symbol."""
+    is_intraday = interval is not None
+    data_timestamp = _get_dataframe_timestamp(df, is_intraday=is_intraday)
+    age_minutes = _get_age_minutes(data_timestamp)
+    used_cache = source in {"cache", "fallback_cache"} or is_fallback
+
+    return {
+        "symbol": symbol,
+        "source": source,
+        "provider": provider.get_provider_name(),
+        "cache_key": cache_key,
+        "interval": interval,
+        "message": message,
+        "is_fresh": is_fresh,
+        "is_fallback": is_fallback,
+        "used_cache": used_cache,
+        "is_test_mode": provider.is_test_mode() or source == "mock",
+        "last_updated": last_updated,
+        "data_timestamp": data_timestamp,
+        "age_minutes": age_minutes,
+    }
+
+
 def init_cache_metadata_table(db_path: str | None = None) -> None:
     """Create cache metadata table if not exists."""
     if db_path is None:
@@ -289,16 +369,17 @@ def get_daily_data_with_cache(
         cached_df = get_cached_daily_data(symbol=symbol, db_path=db_path)
 
     if not cached_df.empty:
-        meta = {
-            "symbol": symbol,
-            "source": "cache",
-            "is_fresh": True,
-            "is_fallback": False,
-            "cache_key": cache_key,
-            "message": "使用未过期缓存数据",
-            "provider": provider.get_provider_name(),
-            "last_updated": metadata.get("last_updated", ""),
-        }
+        meta = _build_meta(
+            symbol=symbol,
+            source=_resolve_success_source(provider, metadata, "cache"),
+            provider=provider,
+            cache_key=cache_key,
+            df=cached_df,
+            message="使用未过期缓存数据",
+            last_updated=metadata.get("last_updated", ""),
+            is_fresh=True,
+            is_fallback=False,
+        )
         return cached_df, meta
 
     # 2) Cache is stale or missing, request API.
@@ -325,16 +406,17 @@ def get_daily_data_with_cache(
             message="使用最新 API 数据",
             db_path=db_path,
         )
-        return api_df, {
-            "symbol": symbol,
-            "source": "api",
-            "is_fresh": True,
-            "is_fallback": False,
-            "cache_key": cache_key,
-            "message": "使用最新 API 数据",
-            "provider": provider.get_provider_name(),
-            "last_updated": now_iso,
-        }
+        return api_df, _build_meta(
+            symbol=symbol,
+            source=_resolve_success_source(provider, {}, "api"),
+            provider=provider,
+            cache_key=cache_key,
+            df=api_df,
+            message="使用最新 API 数据" if not provider.is_test_mode() else "使用 mock 测试数据",
+            last_updated=now_iso,
+            is_fresh=True,
+            is_fallback=False,
+        )
 
     # 3) API failed or returned empty, fallback to latest stored cache.
     fallback_df = get_latest_cached_daily_data(symbol=symbol, db_path=db_path)
@@ -356,14 +438,17 @@ def get_daily_data_with_cache(
             db_path=db_path,
         )
         return fallback_df, {
-            "symbol": symbol,
-            "source": "fallback_cache",
-            "is_fresh": False,
-            "is_fallback": True,
-            "cache_key": cache_key,
-            "message": fallback_msg,
-            "provider": provider.get_provider_name(),
-            "last_updated": metadata.get("last_updated", now_iso),
+            **_build_meta(
+                symbol=symbol,
+                source=_resolve_success_source(provider, metadata, "fallback_cache"),
+                provider=provider,
+                cache_key=cache_key,
+                df=fallback_df,
+                message=fallback_msg,
+                last_updated=metadata.get("last_updated", now_iso),
+                is_fresh=False,
+                is_fallback=True,
+            ),
         }
 
     # 4) API failed and no fallback cache exists.
@@ -383,16 +468,17 @@ def get_daily_data_with_cache(
         message=missing_msg,
         db_path=db_path,
     )
-    return pd.DataFrame(), {
-        "symbol": symbol,
-        "source": "missing",
-        "is_fresh": False,
-        "is_fallback": False,
-        "cache_key": cache_key,
-        "message": missing_msg,
-        "provider": provider.get_provider_name(),
-        "last_updated": "",
-    }
+    return pd.DataFrame(), _build_meta(
+        symbol=symbol,
+        source="missing",
+        provider=provider,
+        cache_key=cache_key,
+        df=pd.DataFrame(),
+        message=missing_msg,
+        last_updated="",
+        is_fresh=False,
+        is_fallback=False,
+    )
 
 
 def get_intraday_data_with_cache(
@@ -427,15 +513,18 @@ def get_intraday_data_with_cache(
         cached_df = pd.DataFrame()
 
     if not cached_df.empty:
-        return cached_df, {
-            "symbol": symbol,
-            "source": "cache",
-            "is_fresh": True,
-            "is_fallback": False,
-            "message": "使用缓存数据",
-            "provider": provider.get_provider_name(),
-            "last_updated": metadata.get("last_updated", ""),
-        }
+        return cached_df, _build_meta(
+            symbol=symbol,
+            source=_resolve_success_source(provider, metadata, "cache"),
+            provider=provider,
+            cache_key=cache_key,
+            df=cached_df,
+            message="使用缓存数据",
+            last_updated=metadata.get("last_updated", ""),
+            is_fresh=True,
+            is_fallback=False,
+            interval=interval,
+        )
 
     api_df = provider.get_intraday_data(symbol=symbol, interval=interval, period=period)
     if not api_df.empty:
@@ -454,15 +543,18 @@ def get_intraday_data_with_cache(
             message="使用最新 API 数据",
             db_path=db_path,
         )
-        return api_df, {
-            "symbol": symbol,
-            "source": "api",
-            "is_fresh": True,
-            "is_fallback": False,
-            "message": "使用最新 API 数据",
-            "provider": provider.get_provider_name(),
-            "last_updated": now_iso,
-        }
+        return api_df, _build_meta(
+            symbol=symbol,
+            source=_resolve_success_source(provider, {}, "api"),
+            provider=provider,
+            cache_key=cache_key,
+            df=api_df,
+            message="使用最新 API 数据" if not provider.is_test_mode() else "使用 mock 测试数据",
+            last_updated=now_iso,
+            is_fresh=True,
+            is_fallback=False,
+            interval=interval,
+        )
 
     fallback_df = get_latest_cached_intraday_data(symbol=symbol, interval=interval, db_path=db_path)
     if not fallback_df.empty:
@@ -479,15 +571,18 @@ def get_intraday_data_with_cache(
             message="API 失败，使用最近缓存",
             db_path=db_path,
         )
-        return fallback_df, {
-            "symbol": symbol,
-            "source": "fallback_cache",
-            "is_fresh": False,
-            "is_fallback": True,
-            "message": "API 失败，使用最近缓存",
-            "provider": provider.get_provider_name(),
-            "last_updated": metadata.get("last_updated", now_iso),
-        }
+        return fallback_df, _build_meta(
+            symbol=symbol,
+            source=_resolve_success_source(provider, metadata, "fallback_cache"),
+            provider=provider,
+            cache_key=cache_key,
+            df=fallback_df,
+            message="API 失败，使用最近缓存",
+            last_updated=metadata.get("last_updated", now_iso),
+            is_fresh=False,
+            is_fallback=True,
+            interval=interval,
+        )
 
     now_iso = _iso_utc(_now_utc())
     update_cache_metadata(
@@ -502,12 +597,15 @@ def get_intraday_data_with_cache(
         message="无可用数据",
         db_path=db_path,
     )
-    return pd.DataFrame(), {
-        "symbol": symbol,
-        "source": "none",
-        "is_fresh": False,
-        "is_fallback": False,
-        "message": "无可用数据",
-        "provider": provider.get_provider_name(),
-        "last_updated": "",
-    }
+    return pd.DataFrame(), _build_meta(
+        symbol=symbol,
+        source="missing",
+        provider=provider,
+        cache_key=cache_key,
+        df=pd.DataFrame(),
+        message="无可用数据",
+        last_updated="",
+        is_fresh=False,
+        is_fallback=False,
+        interval=interval,
+    )

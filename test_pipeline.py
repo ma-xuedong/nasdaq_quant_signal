@@ -36,6 +36,10 @@ def _sample_intraday(symbol: str = "QQQ") -> pd.DataFrame:
     )
 
 
+def _score_result(base_score: float) -> dict:
+    return {"base_score": base_score, "reasons": [], "warnings": []}
+
+
 def test_pipeline_success() -> None:
     def fake_daily(symbol: str, **kwargs):
         return _sample_daily(symbol), {"source": "api", "is_fresh": True, "is_fallback": False}
@@ -45,10 +49,16 @@ def test_pipeline_success() -> None:
 
     with patch("src.pipeline.get_daily_data_with_cache", side_effect=fake_daily), patch(
         "src.pipeline.get_intraday_data_with_cache", side_effect=fake_intraday
-    ), patch("src.pipeline.sleep_between_requests", return_value=None):
+    ), patch("src.pipeline.sleep_between_requests", return_value=None), patch(
+        "src.pipeline.calculate_tqqq_score", return_value=_score_result(95)
+    ), patch("src.pipeline.calculate_sqqq_score", return_value=_score_result(20)), patch(
+        "src.pipeline.get_risk_deduction", return_value={"deduction": 0, "reasons": []}
+    ):
         result = run_signal_pipeline(save_to_db=False, use_cache=True)
 
     assert result["success"] is True
+    assert result["is_realtime_usable"] is True
+    assert result["is_test_mode"] is False
     for key in [
         "indicator_snapshot",
         "tqqq_result",
@@ -57,19 +67,44 @@ def test_pipeline_success() -> None:
         "final_scores",
         "market_state",
         "data_quality",
+        "data_source_status",
         "warnings",
     ]:
         assert key in result
 
 
-def test_pipeline_fail_when_qqq_missing() -> None:
+def test_pipeline_fallback_cache_degrades_signal() -> None:
     def fake_daily(symbol: str, **kwargs):
         if symbol == "QQQ":
-            return pd.DataFrame(), {"source": "none", "is_fresh": False, "is_fallback": False}
+            return _sample_daily(symbol), {"source": "fallback_cache", "is_fresh": False, "is_fallback": True}
         return _sample_daily(symbol), {"source": "api", "is_fresh": True, "is_fallback": False}
 
     def fake_intraday(symbol: str, **kwargs):
-        return pd.DataFrame(), {"source": "none", "is_fresh": False, "is_fallback": False}
+        return _sample_intraday(symbol), {"source": "fallback_cache", "is_fresh": False, "is_fallback": True}
+
+    with patch("src.pipeline.get_daily_data_with_cache", side_effect=fake_daily), patch(
+        "src.pipeline.get_intraday_data_with_cache", side_effect=fake_intraday
+    ), patch("src.pipeline.sleep_between_requests", return_value=None), patch(
+        "src.pipeline.calculate_tqqq_score", return_value=_score_result(95)
+    ), patch("src.pipeline.calculate_sqqq_score", return_value=_score_result(10)), patch(
+        "src.pipeline.get_risk_deduction", return_value={"deduction": 0, "reasons": []}
+    ):
+        result = run_signal_pipeline(save_to_db=False, use_cache=True)
+
+    assert result["success"] is True
+    assert result["is_realtime_usable"] is False
+    assert result["final_scores"]["tqqq_final_score"] < 75
+    assert "fallback_cache" in result["summary"]
+
+
+def test_pipeline_fail_when_qqq_missing() -> None:
+    def fake_daily(symbol: str, **kwargs):
+        if symbol == "QQQ":
+            return pd.DataFrame(), {"source": "missing", "is_fresh": False, "is_fallback": False}
+        return _sample_daily(symbol), {"source": "api", "is_fresh": True, "is_fallback": False}
+
+    def fake_intraday(symbol: str, **kwargs):
+        return pd.DataFrame(), {"source": "missing", "is_fresh": False, "is_fallback": False}
 
     with patch("src.pipeline.get_daily_data_with_cache", side_effect=fake_daily), patch(
         "src.pipeline.get_intraday_data_with_cache", side_effect=fake_intraday
@@ -79,9 +114,33 @@ def test_pipeline_fail_when_qqq_missing() -> None:
     assert result["success"] is False
 
 
+def test_pipeline_mock_mode_blocks_real_signal() -> None:
+    def fake_daily(symbol: str, **kwargs):
+        return _sample_daily(symbol), {"source": "mock", "is_fresh": True, "is_fallback": False, "is_test_mode": True}
+
+    def fake_intraday(symbol: str, **kwargs):
+        return _sample_intraday(symbol), {"source": "mock", "is_fresh": True, "is_fallback": False, "is_test_mode": True}
+
+    with patch("src.pipeline.get_daily_data_with_cache", side_effect=fake_daily), patch(
+        "src.pipeline.get_intraday_data_with_cache", side_effect=fake_intraday
+    ), patch("src.pipeline.sleep_between_requests", return_value=None), patch(
+        "src.pipeline.calculate_tqqq_score", return_value=_score_result(95)
+    ), patch("src.pipeline.calculate_sqqq_score", return_value=_score_result(10)), patch(
+        "src.pipeline.get_risk_deduction", return_value={"deduction": 0, "reasons": []}
+    ):
+        result = run_signal_pipeline(save_to_db=False, use_cache=True)
+
+    assert result["success"] is True
+    assert result["is_test_mode"] is True
+    assert result["final_scores"]["tqqq_final_score"] < 60
+    assert "测试" in result["summary"]
+
+
 def main() -> None:
     test_pipeline_success()
+    test_pipeline_fallback_cache_degrades_signal()
     test_pipeline_fail_when_qqq_missing()
+    test_pipeline_mock_mode_blocks_real_signal()
     print("test_pipeline passed")
 
 

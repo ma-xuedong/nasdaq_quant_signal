@@ -3,6 +3,15 @@
 # Data provider configuration
 DATA_PROVIDER = "yfinance"
 
+# Formal runtime must prefer real or near-real market data.
+REAL_DATA_PROVIDERS = ["yfinance", "finnhub", "tiingo", "polygon", "ibkr"]
+TEST_DATA_PROVIDERS = ["mock"]
+
+# Core freshness policy
+CORE_REALTIME_SYMBOLS = ["QQQ", "SPY", "TQQQ", "SQQQ"]
+CORE_INTRADAY_SYMBOL = "QQQ"
+CORE_REALTIME_MAX_AGE_MINUTES = 15
+
 # Cache policy (phase 2)
 DAILY_CACHE_MAX_AGE_MINUTES = 30
 INTRADAY_CACHE_MAX_AGE_MINUTES = 5
