@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import patch
 import tempfile
 from pathlib import Path
@@ -198,8 +199,63 @@ def test_backtest_trade_storage_fields_roundtrip() -> None:
     assert "signal_score" in loaded.columns
     assert "data_quality_level" in loaded.columns
     assert "execution_mode" in loaded.columns
+    assert float(loaded.iloc[0]["signal_score"]) == 88.0
     assert loaded.iloc[0]["data_quality_level"] == "high"
     assert loaded.iloc[0]["execution_mode"] == "close_to_next_open"
+
+
+def test_backtest_trade_storage_migrates_legacy_table() -> None:
+    trades_df = pd.DataFrame(
+        [
+            {
+                "entry_date": "2025-02-02",
+                "exit_date": "2025-02-03",
+                "symbol": "SQQQ",
+                "entry_price": 20.0,
+                "exit_price": 19.0,
+                "return_pct": -0.05,
+                "exit_reason": "StopLoss",
+                "holding_days": 1,
+                "signal_score": 72,
+                "data_quality_level": "medium",
+                "execution_mode": "close_to_next_close",
+            }
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "legacy_backtest.db")
+        conn = sqlite3.connect(db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE backtest_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_date TEXT NOT NULL,
+                    exit_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    entry_price REAL,
+                    exit_price REAL,
+                    return_pct REAL,
+                    exit_reason TEXT,
+                    holding_days INTEGER,
+                    created_at TEXT
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        saved = save_backtest_trades(trades_df, db_path=db_path)
+        loaded = load_backtest_trades(limit=10, db_path=db_path)
+
+    assert saved == 1
+    assert not loaded.empty
+    assert float(loaded.iloc[0]["signal_score"]) == 72.0
+    assert loaded.iloc[0]["data_quality_level"] == "medium"
+    assert loaded.iloc[0]["execution_mode"] == "close_to_next_close"
 
 
 def main() -> None:
@@ -210,6 +266,7 @@ def main() -> None:
     test_calculate_backtest_metrics_and_bucket_analysis()
     test_empty_trades_do_not_crash()
     test_backtest_trade_storage_fields_roundtrip()
+    test_backtest_trade_storage_migrates_legacy_table()
     print("test_backtest passed")
 
 
