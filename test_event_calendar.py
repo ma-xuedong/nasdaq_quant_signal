@@ -23,6 +23,13 @@ SAMPLE_RISK_EVENTS = {
 }
 
 
+ALIAS_RISK_EVENTS = {
+    "2026-05-18": [
+        {"event_type": "cpi", "title": "美国 CPI 别名", "importance": "high", "risk_score": 18},
+    ]
+}
+
+
 def test_load_risk_events_normalizes_entries() -> None:
     with patch("src.event_calendar.settings.RISK_EVENTS", SAMPLE_RISK_EVENTS):
         events = load_risk_events()
@@ -63,11 +70,26 @@ def test_risk_filter_uses_event_calendar_snapshot() -> None:
     assert result["event_risk_snapshot"]["today_event_count"] == 2
 
 
+def test_alias_fields_are_normalized() -> None:
+    with patch("src.event_calendar.settings.RISK_EVENTS", ALIAS_RISK_EVENTS):
+        events = load_risk_events()
+        snapshot = build_event_risk_snapshot("2026-05-18")
+
+    event = events["2026-05-18"][0]
+    assert event["type"] == "CPI"
+    assert event["label"] == "美国 CPI 别名"
+    assert event["name"] == "美国 CPI 别名"
+    assert event["severity"] == "high"
+    assert event["deduction"] == 18
+    assert snapshot["deduction"] == 18
+
+
 def main() -> None:
     test_load_risk_events_normalizes_entries()
     test_get_events_and_upcoming_events()
     test_calculate_event_risk_and_snapshot()
     test_risk_filter_uses_event_calendar_snapshot()
+    test_alias_fields_are_normalized()
     print("test_event_calendar passed")
 
 

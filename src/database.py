@@ -14,6 +14,17 @@ from src.utils import setup_logger
 logger = setup_logger("database")
 
 
+def _ensure_table_columns(cursor, table_name: str, required_columns: dict[str, str]) -> None:
+    """Add missing columns for legacy SQLite tables."""
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+
+    for column_name, column_type in required_columns.items():
+        if column_name in existing_columns:
+            continue
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+
 def validate_required_columns(df: pd.DataFrame, required_columns: list[str]) -> bool:
     """检查 DataFrame 是否包含必要字段。"""
     missing = [col for col in required_columns if col not in df.columns]
@@ -169,6 +180,26 @@ def init_database(db_path: str | None = None) -> None:
                 updated_at TEXT
             )
         """)
+        _ensure_table_columns(
+            cursor,
+            "trade_journal",
+            {
+                "signal_type": "TEXT",
+                "system_tqqq_score": "REAL",
+                "system_sqqq_score": "REAL",
+                "market_state": "TEXT",
+                "actual_action": "TEXT",
+                "entry_price": "REAL",
+                "exit_price": "REAL",
+                "position_size": "REAL",
+                "return_pct": "REAL",
+                "followed_signal": "INTEGER",
+                "mistake_type": "TEXT",
+                "notes": "TEXT",
+                "created_at": "TEXT",
+                "updated_at": "TEXT",
+            },
+        )
 
         # cache_metadata table
         cursor.execute("""
@@ -674,9 +705,21 @@ def init_backtest_tables(db_path: str | None = None) -> None:
                 return_pct REAL,
                 exit_reason TEXT,
                 holding_days INTEGER,
+                signal_score REAL,
+                data_quality_level TEXT,
+                execution_mode TEXT,
                 created_at TEXT
             )
         """)
+        _ensure_table_columns(
+            cursor,
+            "backtest_trades",
+            {
+                "signal_score": "REAL",
+                "data_quality_level": "TEXT",
+                "execution_mode": "TEXT",
+            },
+        )
         
         # Backtest metrics table
         cursor.execute("""
@@ -818,6 +861,8 @@ def save_backtest_trades(
     
     if db_path is None:
         db_path = DATABASE_PATH
+
+    init_backtest_tables(db_path)
     
     try:
         conn = get_connection(db_path)
@@ -829,9 +874,10 @@ def save_backtest_trades(
         for _, row in df_trades.iterrows():
             cursor.execute("""
                 INSERT INTO backtest_trades
-                (entry_date, exit_date, symbol, entry_price, exit_price, 
-                 return_pct, exit_reason, holding_days, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (entry_date, exit_date, symbol, entry_price, exit_price,
+                 return_pct, exit_reason, holding_days, signal_score,
+                 data_quality_level, execution_mode, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(row.get("entry_date", "")),
                 str(row.get("exit_date", "")),
@@ -841,6 +887,9 @@ def save_backtest_trades(
                 float(row.get("return_pct", 0)),
                 str(row.get("exit_reason", "")),
                 int(row.get("holding_days", 0)),
+                float(row.get("signal_score", 0)) if pd.notna(row.get("signal_score", None)) else None,
+                str(row.get("data_quality_level", "")),
+                str(row.get("execution_mode", "")),
                 now
             ))
             count += 1
@@ -969,6 +1018,8 @@ def load_backtest_trades(
     """Load recent backtest trades."""
     if db_path is None:
         db_path = DATABASE_PATH
+
+    init_backtest_tables(db_path)
     
     try:
         conn = get_connection(db_path)
@@ -983,6 +1034,9 @@ def load_backtest_trades(
                 return_pct,
                 exit_reason,
                 holding_days,
+                signal_score,
+                data_quality_level,
+                execution_mode,
                 created_at
             FROM backtest_trades
             ORDER BY entry_date DESC

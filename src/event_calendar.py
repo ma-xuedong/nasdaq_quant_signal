@@ -47,17 +47,17 @@ def _normalize_event(raw_event: Any) -> dict[str, Any] | None:
     if not isinstance(raw_event, dict):
         return None
 
-    raw_type = raw_event.get("type") or raw_event.get("name") or raw_event.get("event")
+    raw_type = raw_event.get("type") or raw_event.get("event_type") or raw_event.get("name") or raw_event.get("event")
     event_type = str(raw_type or "UNKNOWN").strip().upper()
     if not event_type:
         return None
 
     rule = DEFAULT_EVENT_RULES.get(event_type, {})
-    severity = str(raw_event.get("severity") or rule.get("severity", "medium")).strip().lower()
+    severity = str(raw_event.get("severity") or raw_event.get("importance") or rule.get("severity", "medium")).strip().lower()
     if severity not in {"low", "medium", "high"}:
         severity = "medium"
 
-    deduction = raw_event.get("deduction", rule.get("deduction", 10))
+    deduction = raw_event.get("deduction", raw_event.get("risk_score", rule.get("deduction", 10)))
     try:
         deduction_value = float(deduction)
     except (TypeError, ValueError):
@@ -68,9 +68,9 @@ def _normalize_event(raw_event: Any) -> dict[str, Any] | None:
         symbols = [symbols] if symbols else []
 
     return {
-        "name": str(raw_event.get("name") or event_type),
+        "name": str(raw_event.get("name") or raw_event.get("title") or event_type),
         "type": event_type,
-        "label": str(raw_event.get("label") or raw_event.get("name") or event_type),
+        "label": str(raw_event.get("label") or raw_event.get("title") or raw_event.get("name") or event_type),
         "severity": severity,
         "deduction": deduction_value,
         "description": str(raw_event.get("description") or ""),

@@ -5,8 +5,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+import pandas as pd
 
-from src.database import init_database
+from src.database import get_connection, init_database
 from src.trade_journal import (
     add_trade_record,
     calculate_trade_journal_stats,
@@ -37,11 +38,9 @@ def _sample_record(symbol: str = "TQQQ") -> dict:
 def test_add_update_load_and_stats() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = str(Path(temp_dir) / "journal.db")
-        with patch("src.database.DATABASE_PATH", db_path), patch("src.trade_journal.get_connection") as mocked_get_connection, patch("src.trade_journal.init_database") as mocked_init_database:
-            from src.database import get_connection as real_get_connection
-
-            mocked_get_connection.side_effect = lambda: real_get_connection(db_path)
-            mocked_init_database.side_effect = lambda: init_database(db_path)
+        with patch("src.trade_journal.get_connection", side_effect=lambda: get_connection(db_path)), patch(
+            "src.trade_journal.init_database", side_effect=lambda: init_database(db_path)
+        ):
 
             record_id = add_trade_record(_sample_record())
             assert record_id > 0
@@ -66,7 +65,13 @@ def test_add_update_load_and_stats() -> None:
 
 
 def test_empty_stats_do_not_crash() -> None:
-    stats = calculate_trade_journal_stats(load_trade_records(symbol="NO_SUCH_SYMBOL"))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "journal.db")
+        with patch("src.trade_journal.get_connection", side_effect=lambda: get_connection(db_path)), patch(
+            "src.trade_journal.init_database", side_effect=lambda: init_database(db_path)
+        ):
+            stats = calculate_trade_journal_stats(load_trade_records(symbol="NO_SUCH_SYMBOL"))
+
     assert stats["total_trades"] == 0
     assert stats["mistake_type_counts"] == {}
 

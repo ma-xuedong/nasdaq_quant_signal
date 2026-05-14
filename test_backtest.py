@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from unittest.mock import patch
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -14,6 +16,7 @@ from src.backtest import (
     generate_trade_signals,
     simulate_trades,
 )
+from src.database import init_backtest_tables, load_backtest_trades, save_backtest_trades
 
 
 def _price_frame(symbol: str, start: str = "2025-01-01", periods: int = 210, slope: float = 1.0) -> pd.DataFrame:
@@ -165,6 +168,40 @@ def test_empty_trades_do_not_crash() -> None:
     assert quality_bucket_df.empty
 
 
+def test_backtest_trade_storage_fields_roundtrip() -> None:
+    trades_df = pd.DataFrame(
+        [
+            {
+                "entry_date": "2025-01-02",
+                "exit_date": "2025-01-03",
+                "symbol": "TQQQ",
+                "entry_price": 10.0,
+                "exit_price": 10.5,
+                "return_pct": 0.05,
+                "exit_reason": "TimeOut",
+                "holding_days": 2,
+                "signal_score": 88,
+                "data_quality_level": "high",
+                "execution_mode": "close_to_next_open",
+            }
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = str(Path(temp_dir) / "backtest.db")
+        init_backtest_tables(db_path)
+        saved = save_backtest_trades(trades_df, db_path=db_path)
+        loaded = load_backtest_trades(limit=10, db_path=db_path)
+
+    assert saved == 1
+    assert not loaded.empty
+    assert "signal_score" in loaded.columns
+    assert "data_quality_level" in loaded.columns
+    assert "execution_mode" in loaded.columns
+    assert loaded.iloc[0]["data_quality_level"] == "high"
+    assert loaded.iloc[0]["execution_mode"] == "close_to_next_open"
+
+
 def main() -> None:
     test_generate_score_history_avoids_future_data()
     test_generate_trade_signals_includes_quality_level()
@@ -172,6 +209,7 @@ def main() -> None:
     test_simulate_trades_distinguishes_tqqq_and_sqqq()
     test_calculate_backtest_metrics_and_bucket_analysis()
     test_empty_trades_do_not_crash()
+    test_backtest_trade_storage_fields_roundtrip()
     print("test_backtest passed")
 
 
