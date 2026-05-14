@@ -1,7 +1,35 @@
 """Central configuration for the TQQQ / SQQQ signal project."""
 
+import os
+
+
+def _load_local_env_file(env_path: str = ".env") -> None:
+    """Load simple KEY=VALUE pairs from .env when python-dotenv is unavailable."""
+    if not os.path.exists(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    _load_local_env_file()
+else:
+    load_dotenv()
+
 # Data provider configuration
-DATA_PROVIDER = "yfinance"
+DATA_PROVIDER = os.getenv("DATA_PROVIDER", "yfinance").strip().lower()
 
 # Formal runtime must prefer real or near-real market data.
 REAL_DATA_PROVIDERS = ["yfinance", "finnhub", "tiingo", "polygon", "ibkr"]

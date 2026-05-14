@@ -25,11 +25,11 @@ TQQQ / SQQQ 纳指量化信号辅助系统。
 - 第一期 MVP：已完成
 - 第二期工程化改造：进行中
 - 已接入模块：
-  - 数据源抽象层 `src/data_provider/`
-  - 本地缓存模块 `src/cache.py`
-  - 请求限流与重试模块 `src/rate_limiter.py`
-  - 统一信号流程 `src/pipeline.py`
-  - 数据质量评估模块 `src/data_quality.py`
+  - 数据源抽象层
+  - 本地缓存
+  - 请求限流与重试
+  - 统一信号流程
+  - 数据质量评估
 
 本系统仅用于个人量化研究和交易辅助，不构成任何投资建议。
 
@@ -43,35 +43,27 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. 运行命令行版本（完整演示）
+### 2. 配置数据源
+
+在项目根目录创建 `.env`，例如：
+
+```env
+DATA_PROVIDER=yfinance
+```
+
+可切换值包括：`yfinance`、`mock`、`finnhub`、`tiingo`。
+
+说明：
+- 正式运行应优先使用真实行情源
+- `mock` 仅用于开发测试，不可用于真实交易判断
+
+### 3. 运行命令行版本
 
 ```bash
 python main.py
 ```
 
-输出示例：
-```
-====== TQQQ / SQQQ Signal Report ======
-
-【数据抓取阶段】
-✓ QQQ 日线数据已获取
-✓ SPY 日线数据已获取
-...
-
-【评分计算阶段】
-✓ TQQQ 基础评分：75 分
-✓ SQQQ 基础评分：30 分
-
-【最终评分阶段】
-TQQQ 最终评分：68 分
-SQQQ 最终评分：20 分
-
-【市场总结与建议】
-综合判断：空仓等待
-...
-```
-
-### 3. 运行 Streamlit 可视化面板
+### 4. 运行 Streamlit 可视化面板
 
 ```bash
 streamlit run app.py
@@ -98,7 +90,7 @@ streamlit run app.py
   - 观察信号分布统计
   - 评估策略有效性
 
-### 4. 执行历史回测
+### 5. 执行历史回测
 
 ```bash
 python main.py --backtest
@@ -136,36 +128,13 @@ TQQQ / SQQQ 回测报告
 
 ## 项目结构
 
-```
-nasdaq_quant_signal/
-├── app.py                         # Streamlit 可视化面板（900+ 行）
-├── main.py                        # 命令行完整演示脚本
-├── config/
-│   ├── settings.py               # 全局配置（标的代码、参数、回测参数）
-│   └── __init__.py
-├── src/
-│   ├── data_provider/            # 数据源抽象层（provider接口与实现）
-│   ├── data_fetcher.py           # 数据抓取门面层（兼容旧调用）
-│   ├── cache.py                  # 缓存与fallback逻辑
-│   ├── rate_limiter.py           # 请求节流与失败重试
-│   ├── pipeline.py               # 统一信号流程入口
-│   ├── data_quality.py           # 数据质量与置信度评估
-│   ├── indicators.py             # 技术指标计算（10 个指标）
-│   ├── scoring.py                # 评分系统（5 个模块）
-│   ├── risk_filter.py            # 风险管理和扣分
-│   ├── market_state.py           # 市场状态分类和总结
-│   ├── database.py               # SQLite 数据库操作（1000+ 行）
-│   ├── backtest.py               # 回测系统（800+ 行）
-│   ├── utils.py                  # 工具函数（日志等）
-│   └── __init__.py
-├── data/
-│   ├── market_data.db            # SQLite 数据库文件
-│   └── .gitkeep
-├── test_*.py                      # 各阶段的单元测试脚本
-├── PHASE*_ACCEPTANCE.md          # 各阶段验收报告
-├── requirements.txt              # Python 依赖列表
-└── README.md                      # 本文件
-```
+- `config/`：配置项与运行参数
+- `src/data_provider/`：数据源抽象层与 provider 实现
+- `src/cache.py`：缓存、fallback 与元信息标记
+- `src/pipeline.py`：统一信号流程入口
+- `src/data_quality.py`：数据质量与实时性判断
+- `app.py`：Streamlit 页面入口
+- `main.py`：命令行入口
 
 ## 核心模块说明
 
