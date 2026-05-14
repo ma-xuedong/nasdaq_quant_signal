@@ -3,6 +3,7 @@
 from config import settings
 from src.data_provider.mock_provider import MockProvider
 from src.data_provider.provider_types import ProviderType
+from src.data_provider.tiingo_provider import TiingoProvider
 from src.data_provider.yfinance_provider import YFinanceProvider
 
 
@@ -14,4 +15,6 @@ def get_data_provider():
         return YFinanceProvider()
     if provider_name == ProviderType.MOCK.value:
         return MockProvider()
+    if provider_name == ProviderType.TIINGO.value:
+        return TiingoProvider()
     raise ValueError(f"Unsupported data provider: {provider_name}")
