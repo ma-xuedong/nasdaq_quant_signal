@@ -30,6 +30,8 @@ else:
 
 # Data provider configuration
 DATA_PROVIDER = os.getenv("DATA_PROVIDER", "yfinance").strip().lower()
+CSV_DATA_DIR = os.getenv("CSV_DATA_DIR", "data/raw")
+TIINGO_API_KEY = os.getenv("TIINGO_API_KEY", "")
 
 # Formal runtime must prefer real or near-real market data.
 REAL_DATA_PROVIDERS = ["yfinance", "finnhub", "tiingo", "polygon", "ibkr"]

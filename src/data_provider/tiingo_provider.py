@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 import requests
 
+from config import settings
 from src.data_provider.base_provider import BaseDataProvider
 from src.utils import setup_logger
 
@@ -26,11 +27,16 @@ UNSUPPORTED_TIINGO_SYMBOLS = {"^VIX", "^VXN", "NQ=F", "ES=F", "MNQ=F", "MES=F"}
 DAILY_COLUMNS = ["date", "open", "high", "low", "close", "adj_close", "volume", "symbol"]
 
 
-def _period_to_dates(period: str, now: datetime | None = None) -> tuple[str, str]:
-    reference = now or datetime.now(timezone.utc)
+def period_to_start_date(period: str, end_date: datetime | None = None) -> str:
+    reference = end_date or datetime.now(timezone.utc)
     days = SUPPORTED_PERIOD_DAYS.get(period, SUPPORTED_PERIOD_DAYS["1y"])
     start = reference - timedelta(days=days)
-    return start.strftime("%Y-%m-%d"), reference.strftime("%Y-%m-%d")
+    return start.strftime("%Y-%m-%d")
+
+
+def _period_to_dates(period: str, now: datetime | None = None) -> tuple[str, str]:
+    reference = now or datetime.now(timezone.utc)
+    return period_to_start_date(period, end_date=reference), reference.strftime("%Y-%m-%d")
 
 
 def normalize_tiingo_eod_dataframe(data: Any, symbol: str) -> pd.DataFrame:
@@ -42,12 +48,25 @@ def normalize_tiingo_eod_dataframe(data: Any, symbol: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    df = df.rename(columns={"adjClose": "adj_close", "adjOpen": "adj_open", "adjHigh": "adj_high", "adjLow": "adj_low"})
+    df = df.rename(
+        columns={
+            "adjClose": "adj_close",
+            "adjOpen": "adj_open",
+            "adjHigh": "adj_high",
+            "adjLow": "adj_low",
+            "adjVolume": "adj_volume",
+        }
+    )
     if "date" not in df.columns:
         return pd.DataFrame()
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.tz_localize(None)
     df["symbol"] = symbol
+
+    if "adj_close" not in df.columns and "close" in df.columns:
+        df["adj_close"] = df["close"]
+    if "volume" not in df.columns and "adj_volume" in df.columns:
+        df["volume"] = df["adj_volume"]
 
     for column in ["open", "high", "low", "close", "adj_close", "volume"]:
         if column not in df.columns:
@@ -61,7 +80,8 @@ class TiingoProvider(BaseDataProvider):
     """Tiingo provider for historical daily EOD data."""
 
     def __init__(self, api_key: str | None = None, session: requests.Session | None = None, timeout: int = 20) -> None:
-        self.api_key = api_key if api_key is not None else os.getenv("TIINGO_API_KEY", "").strip()
+        configured_key = getattr(settings, "TIINGO_API_KEY", "") or os.getenv("TIINGO_API_KEY", "")
+        self.api_key = api_key if api_key is not None else configured_key.strip()
         self.session = session or requests.Session()
         self.timeout = timeout
 

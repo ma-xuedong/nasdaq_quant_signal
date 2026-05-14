@@ -1,6 +1,7 @@
 """Provider factory for selecting data source by config."""
 
 from config import settings
+from src.data_provider.csv_provider import CSVProvider
 from src.data_provider.mock_provider import MockProvider
 from src.data_provider.provider_types import ProviderType
 from src.data_provider.tiingo_provider import TiingoProvider
@@ -13,6 +14,8 @@ def get_data_provider():
 
     if provider_name == ProviderType.YFINANCE.value:
         return YFinanceProvider()
+    if provider_name == ProviderType.CSV.value:
+        return CSVProvider()
     if provider_name == ProviderType.MOCK.value:
         return MockProvider()
     if provider_name == ProviderType.TIINGO.value:

@@ -9,7 +9,7 @@ import pandas as pd
 
 from config import settings
 from src.data_provider.provider_factory import get_data_provider
-from src.data_provider.tiingo_provider import TiingoProvider
+from src.data_provider.tiingo_provider import TiingoProvider, period_to_start_date
 
 
 class FakeResponse:
@@ -79,7 +79,16 @@ def test_tiingo_provider_without_api_key_returns_empty_dataframe() -> None:
 
 
 def test_tiingo_provider_http_error_returns_empty_dataframe() -> None:
-    provider = TiingoProvider(api_key="test-key", session=FakeSession(FakeResponse(status_code=500)))
+    for status_code in [401, 429, 500]:
+        provider = TiingoProvider(api_key="test-key", session=FakeSession(FakeResponse(status_code=status_code)))
+
+        df = provider.get_daily_data("QQQ", period="1y")
+
+        assert df.empty
+
+
+def test_tiingo_provider_empty_json_returns_empty_dataframe() -> None:
+    provider = TiingoProvider(api_key="test-key", session=FakeSession(FakeResponse(payload=[])))
 
     df = provider.get_daily_data("QQQ", period="1y")
 
@@ -105,12 +114,21 @@ def test_provider_factory_returns_tiingo_provider() -> None:
     assert isinstance(provider, TiingoProvider)
 
 
+def test_period_to_start_date() -> None:
+    end_date = pd.Timestamp("2026-05-14", tz="UTC").to_pydatetime()
+
+    assert period_to_start_date("1y", end_date=end_date) == "2025-05-14"
+    assert period_to_start_date("3y", end_date=end_date) == "2023-05-15"
+
+
 def main() -> None:
     test_tiingo_provider_standardizes_daily_fields()
     test_tiingo_provider_without_api_key_returns_empty_dataframe()
     test_tiingo_provider_http_error_returns_empty_dataframe()
+    test_tiingo_provider_empty_json_returns_empty_dataframe()
     test_tiingo_provider_unsupported_symbols_return_empty_dataframe()
     test_provider_factory_returns_tiingo_provider()
+    test_period_to_start_date()
     print("test_tiingo_provider passed")
 
 

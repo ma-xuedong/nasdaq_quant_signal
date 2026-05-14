@@ -7,6 +7,7 @@ class ProviderType(str, Enum):
     """Supported provider names."""
 
     YFINANCE = "yfinance"
+    CSV = "csv"
     FINNHUB = "finnhub"
     TIINGO = "tiingo"
     POLYGON = "polygon"
