@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime
 from typing import Any
 
-from config.settings import CORE_REALTIME_SYMBOLS, RISK_DISCLOSURE
+from config.settings import BACKTEST_DISCLOSURE, CORE_REALTIME_SYMBOLS, RISK_DISCLOSURE
+from src.backtest import run_backtest
 from src.pipeline import run_signal_pipeline
 
 
@@ -99,8 +101,58 @@ def print_event_risk(result: dict) -> None:
     )
 
 
+def print_backtest_report(result: dict) -> None:
+    """Print a simple backtest report."""
+    metrics = result.get("metrics", {})
+
+    print("====== TQQQ / SQQQ Backtest Report ======")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if result.get("status") != "success":
+        print(result.get("message", "回测执行失败。"))
+        print_warnings(result.get("warnings", []))
+        print()
+        print(BACKTEST_DISCLOSURE)
+        return
+
+    print_section("Backtest Metrics")
+    print(f"Total Trades: {int(metrics.get('total_trades', 0) or 0)}")
+    print(f"Win Rate: {safe_get_number(metrics, 'win_rate') * 100:.2f}%")
+    print(f"Avg Return: {safe_get_number(metrics, 'avg_return') * 100:.2f}%")
+    print(f"Profit Factor: {safe_get_number(metrics, 'profit_factor'):.2f}")
+    print(f"Max Drawdown: {safe_get_number(metrics, 'max_drawdown') * 100:.2f}%")
+    print(f"Avg Holding Days: {safe_get_number(metrics, 'avg_holding_days'):.2f}")
+    print(f"Execution Mode: {result.get('execution_mode', '-')}")
+
+    print_section("Trade Counts")
+    print(f"TQQQ Trades: {int(metrics.get('tqqq_trade_count', 0) or 0)}")
+    print(f"SQQQ Trades: {int(metrics.get('sqqq_trade_count', 0) or 0)}")
+
+    print_warnings(result.get("warnings", []))
+
+    print()
+    print(BACKTEST_DISCLOSURE)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments."""
+    parser = argparse.ArgumentParser(description="TQQQ / SQQQ signal workflow entrypoint")
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="run historical backtest instead of the realtime signal pipeline",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    """Run the main signal pipeline and print a console report."""
+    """Run the realtime pipeline or backtest report based on CLI args."""
+    args = parse_args()
+
+    if args.backtest:
+        print_backtest_report(run_backtest())
+        return
+
     print("====== TQQQ / SQQQ Signal Report ======")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 

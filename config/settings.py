@@ -48,7 +48,7 @@ BREADTH_MIN_REQUIRED_SYMBOLS = 20
 EVENT_RISK_LOOKAHEAD_DAYS = 7
 
 # Database configuration
-DATABASE_PATH = "data/market_data.db"
+DATABASE_PATH = os.getenv("DATABASE_PATH", "data/market_data.db")
 
 ETF_SYMBOLS = ["QQQ", "TQQQ", "SQQQ", "SPY", "QQQE"]
 
