@@ -147,6 +147,29 @@ def init_database(db_path: str | None = None) -> None:
             )
         """)
 
+        # trade_journal table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                datetime TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                signal_type TEXT,
+                system_tqqq_score REAL,
+                system_sqqq_score REAL,
+                market_state TEXT,
+                actual_action TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                position_size REAL,
+                return_pct REAL,
+                followed_signal INTEGER,
+                mistake_type TEXT,
+                notes TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """)
+
         # cache_metadata table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cache_metadata (

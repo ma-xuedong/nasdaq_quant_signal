@@ -61,6 +61,8 @@ def test_pipeline_success() -> None:
     assert result["is_test_mode"] is False
     assert "futures_snapshot" in result
     assert "breadth_snapshot" in result
+    assert "event_risk_snapshot" in result
+    assert result["event_risk_snapshot"]["available"] is True
     for key in [
         "indicator_snapshot",
         "tqqq_result",

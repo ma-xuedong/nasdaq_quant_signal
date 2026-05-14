@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
-from config.settings import RISK_EVENTS
+from src.event_calendar import build_event_risk_snapshot, get_events_for_date
 from src.utils import setup_logger
 
 logger = setup_logger("risk_filter")
@@ -14,7 +13,7 @@ logger = setup_logger("risk_filter")
 
 def check_risk_events(date_str: str) -> list[str]:
     """
-    根据 config/settings.py 中的 RISK_EVENTS 检查当天是否有风险事件。
+    根据本地事件日历检查当天是否有风险事件。
 
     参数：
         date_str: 日期字符串，格式如 "2026-05-13"
@@ -23,13 +22,7 @@ def check_risk_events(date_str: str) -> list[str]:
         ["CPI", "FOMC"] 或 []
     """
     try:
-        if not RISK_EVENTS:
-            return []
-
-        if date_str in RISK_EVENTS:
-            return RISK_EVENTS[date_str]
-
-        return []
+        return [event.get("label") or event.get("type") or "" for event in get_events_for_date(date_str)]
 
     except Exception as e:
         logger.error(f"检查风险事件失败：{str(e)}")
@@ -38,7 +31,8 @@ def check_risk_events(date_str: str) -> list[str]:
 
 def get_risk_deduction(
     date_str: str,
-    indicator_snapshot: dict | None = None
+    indicator_snapshot: dict | None = None,
+    event_risk_snapshot: dict | None = None,
 ) -> dict:
     """
     计算风险扣分。
@@ -56,21 +50,21 @@ def get_risk_deduction(
         ]
     }
     """
-    deduction = 0
-    events = []
-    reasons = []
+    deduction = 0.0
+    events: list[str] = []
+    reasons: list[str] = []
 
     try:
-        # 检查预定义的风险事件
-        risk_events = check_risk_events(date_str)
+        snapshot = event_risk_snapshot or build_event_risk_snapshot(
+            date_str,
+            indicator_snapshot=indicator_snapshot,
+        )
 
-        if risk_events:
-            events.extend(risk_events)
-
-            for event in risk_events:
-                event_deduction = _get_event_deduction(event)
-                deduction += event_deduction
-                reasons.append(_get_event_reason(event, event_deduction))
+        deduction += float(snapshot.get("deduction", 0) or 0)
+        events.extend(
+            [event.get("label") or event.get("type") or "" for event in snapshot.get("today_events", [])]
+        )
+        reasons.extend(snapshot.get("reasons", []))
 
         # 检查动态风险因素（如果提供了指标快照）
         if indicator_snapshot:
@@ -88,7 +82,8 @@ def get_risk_deduction(
         return {
             "deduction": deduction,
             "events": events,
-            "reasons": reasons
+            "reasons": reasons,
+            "event_risk_snapshot": snapshot,
         }
 
     except Exception as e:
@@ -96,32 +91,9 @@ def get_risk_deduction(
         return {
             "deduction": 0,
             "events": [],
-            "reasons": [f"风险评估异常：{str(e)}"]
+            "reasons": [f"风险评估异常：{str(e)}"],
+            "event_risk_snapshot": event_risk_snapshot or {"available": False, "date": date_str},
         }
-
-
-def _get_event_deduction(event: str) -> float:
-    """获取具体事件的扣分。"""
-    deduction_map = {
-        "CPI": 15,           # CPI公布：-10到-20，取中等值15
-        "FOMC": 20,          # FOMC会议：-15到-25，取中等值20
-        "NFPYY": 12,         # 非农公布：-10到-15，取中等值12
-        "EARNINGS": 15,      # 权重股财报：-10到-20，取中等值15
-        "GAP": 15,           # 盘前缺口：-10到-20，取中等值15
-    }
-    return deduction_map.get(event, 10)
-
-
-def _get_event_reason(event: str, deduction: float) -> str:
-    """获取事件的说明。"""
-    reason_map = {
-        "CPI": f"当天公布 CPI 数据，市场波动风险较高，扣分 {deduction:.0f} 分。",
-        "FOMC": f"当天进行 FOMC 会议，政策变化可能导致剧烈波动，扣分 {deduction:.0f} 分。",
-        "NFPYY": f"当天公布非农就业数据，市场波动风险较大，扣分 {deduction:.0f} 分。",
-        "EARNINGS": f"权重股存在财报日期，风险集中，扣分 {deduction:.0f} 分。",
-        "GAP": f"盘前存在大幅缺口，市场风险提升，扣分 {deduction:.0f} 分。",
-    }
-    return reason_map.get(event, f"存在风险事件，扣分 {deduction:.0f} 分。")
 
 
 def _check_dynamic_risks(snapshot: dict) -> tuple[float, list[str]]:

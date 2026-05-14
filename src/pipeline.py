@@ -21,6 +21,7 @@ from src.cache import (
 )
 from src.data_quality import assess_data_quality
 from src.database import init_database, save_indicator_daily, save_market_score
+from src.event_calendar import build_event_risk_snapshot
 from src.futures import build_futures_snapshot
 from src.indicators import build_full_indicator_dataframe, build_indicator_snapshot
 from src.market_state import classify_overall_market_state, generate_market_summary
@@ -129,6 +130,7 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
     warnings.extend(data_quality.get("warnings", []))
     is_test_mode = bool(data_quality.get("is_test_mode", False))
     is_realtime_usable = bool(data_quality.get("is_realtime_usable", False))
+    event_risk_snapshot = build_event_risk_snapshot(now_str)
 
     if daily_data.get("QQQ") is None or daily_data.get("QQQ").empty:
         return {
@@ -140,6 +142,7 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
             "cache_status": cache_status,
             "is_realtime_usable": False,
             "is_test_mode": is_test_mode,
+            "event_risk_snapshot": event_risk_snapshot,
             "warnings": warnings,
         }
 
@@ -186,6 +189,7 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
     data_quality = _refresh_quality_labels(data_quality)
     indicator_snapshot["futures_snapshot"] = futures_snapshot
     indicator_snapshot["breadth_snapshot"] = breadth_snapshot
+    indicator_snapshot["event_risk_snapshot"] = event_risk_snapshot
 
     tqqq_result = calculate_tqqq_score(indicator_snapshot)
     sqqq_result = calculate_sqqq_score(indicator_snapshot)
@@ -193,7 +197,11 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
     tqqq_base = tqqq_result.get("base_score", 0)
     sqqq_base = sqqq_result.get("base_score", 0)
 
-    risk_result = get_risk_deduction(now_str, indicator_snapshot)
+    risk_result = get_risk_deduction(
+        now_str,
+        indicator_snapshot,
+        event_risk_snapshot=event_risk_snapshot,
+    )
     risk_deduction = risk_result.get("deduction", 0)
 
     raw_tqqq_final = calculate_final_score(tqqq_base, risk_deduction)
@@ -238,6 +246,7 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
         final_scores,
         futures_snapshot=futures_snapshot,
         breadth_snapshot=breadth_snapshot,
+        event_risk_snapshot=event_risk_snapshot,
     )
 
     if is_test_mode:
@@ -290,6 +299,7 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
         "indicator_snapshot": indicator_snapshot,
         "futures_snapshot": futures_snapshot,
         "breadth_snapshot": breadth_snapshot,
+        "event_risk_snapshot": event_risk_snapshot,
         "tqqq_result": tqqq_result,
         "sqqq_result": sqqq_result,
         "risk_result": risk_result,

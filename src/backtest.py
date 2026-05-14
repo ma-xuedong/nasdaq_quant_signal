@@ -1,580 +1,573 @@
-"""
-Backtesting module for TQQQ/SQQQ strategy.
-
-This module implements historical simulation of the TQQQ/SQQQ signal system.
-Key principle: NO FUTURE FUNCTIONS - signals are generated using only data
-available at the end of each trading day.
-"""
+"""Backtesting module for TQQQ/SQQQ strategy."""
 
 from __future__ import annotations
 
-import logging
-from datetime import datetime, timedelta
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
+from config.settings import BACKTEST_PARAMS
 from src.data_fetcher import fetch_daily_data
-from src.indicators import build_indicator_snapshot
+from src.data_quality import assess_data_quality
+from src.market_state import classify_overall_market_state
 from src.risk_filter import get_risk_deduction
-from src.scoring import calculate_tqqq_score, calculate_sqqq_score
+from src.scoring import calculate_final_score, calculate_sqqq_score, calculate_tqqq_score
 from src.utils import setup_logger
 
 logger = setup_logger("backtest")
 
 
-def generate_historical_scores(
-    historical_data: dict[str, pd.DataFrame],
-) -> pd.DataFrame:
-    """
-    逐日生成 TQQQ / SQQQ 评分。
+SUPPORTED_EXECUTION_MODES = {"close_to_next_open", "close_to_next_close"}
+MIN_HISTORY_DAYS = 200
+REQUIRED_DAILY_COLUMNS = ["date", "open", "close"]
 
-    原理：
-    - 逐日滚动，每日仅使用当日及之前的数据
-    - 无未来函数
-    - 每一行代表某日收盘后可生成的信号
 
-    参数：
-        historical_data: {'QQQ': df, 'SPY': df, ...} 包含所有必要数据
-
-    返回：
-        DataFrame with columns:
-            date
-            tqqq_base_score
-            sqqq_base_score
-            risk_score
-            tqqq_final_score
-            sqqq_final_score
-            market_state
-            reasons (dict)
-    """
-    logger.info("开始生成历史评分...")
-
-    # 找出共同日期范围（统一使用 date 列，不假设 index 是日期）
-    all_dates = set()
-    normalized_data: dict[str, pd.DataFrame] = {}
-    for symbol, df in historical_data.items():
-        if df is None or df.empty:
-            continue
-        working_df = df.copy()
-        if "date" not in working_df.columns:
-            continue
-        working_df["date"] = pd.to_datetime(working_df["date"], errors="coerce")
-        working_df = working_df.dropna(subset=["date"]).sort_values("date")
-        normalized_data[symbol] = working_df
-        all_dates.update(working_df["date"].tolist())
-    all_dates = sorted(all_dates)
-
-    if len(all_dates) < 200:
-        logger.warning(f"历史数据不足：仅有 {len(all_dates)} 天数据")
+def _normalize_price_frame(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
         return pd.DataFrame()
 
-    # 初始化结果
-    results = []
+    working_df = df.copy()
+    if "date" not in working_df.columns:
+        return pd.DataFrame()
 
-    # 逐日计算（从第200个交易日开始，确保有足够回溯数据）
-    for i, current_date in enumerate(all_dates):
-        if i < 200:  # 至少需要200天的历史数据进行指标计算
+    working_df["date"] = pd.to_datetime(working_df["date"], errors="coerce")
+    working_df = working_df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    return working_df
+
+
+def _normalize_historical_data(historical_data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    normalized: dict[str, pd.DataFrame] = {}
+    for symbol, df in historical_data.items():
+        normalized_df = _normalize_price_frame(df)
+        if not normalized_df.empty:
+            normalized[symbol] = normalized_df
+    return normalized
+
+
+def _build_backtest_cache_status(historical_slice: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
+    cache_status: dict[str, dict[str, Any]] = {}
+    for symbol, df in historical_slice.items():
+        available = bool(df is not None and not df.empty)
+        cache_status[symbol] = {
+            "source": "api" if available else "missing",
+            "is_fresh": available,
+            "is_fallback": False,
+            "used_cache": False,
+        }
+
+    cache_status.setdefault(
+        "QQQ_intraday_5m",
+        {
+            "source": "missing",
+            "is_fresh": False,
+            "is_fallback": False,
+            "used_cache": False,
+        },
+    )
+    return cache_status
+
+
+def _build_indicator_snapshot(historical_slice: dict[str, pd.DataFrame]) -> dict[str, Any]:
+    qqq_df = historical_slice.get("QQQ")
+    spy_df = historical_slice.get("SPY")
+    qqqe_df = historical_slice.get("QQQE")
+
+    snapshot: dict[str, Any] = {
+        "qqq": {},
+        "relative_strength": {},
+        "mega_cap_tech": {"status": "mixed", "strong_count": 0, "available_count": 0},
+        "intraday": {},
+    }
+
+    if qqq_df is not None and not qqq_df.empty:
+        qqq_close = float(qqq_df.iloc[-1]["close"])
+        ma20 = float(qqq_df["close"].tail(20).mean()) if len(qqq_df) >= 20 else qqq_close
+        ma50 = float(qqq_df["close"].tail(50).mean()) if len(qqq_df) >= 50 else qqq_close
+        ma200 = float(qqq_df["close"].tail(200).mean()) if len(qqq_df) >= 200 else qqq_close
+        prior_close = float(qqq_df.iloc[-2]["close"]) if len(qqq_df) >= 2 else qqq_close
+        snapshot["qqq"] = {
+            "price": round(qqq_close, 2),
+            "ma20": round(ma20, 2),
+            "ma50": round(ma50, 2),
+            "ma200": round(ma200, 2),
+            "atr14": round(max(qqq_close * 0.02, 1.0), 2),
+            "daily_return": round((qqq_close - prior_close) / prior_close, 4) if prior_close else 0.0,
+            "volume_ratio": 1.0,
+        }
+
+    if (
+        qqq_df is not None
+        and not qqq_df.empty
+        and spy_df is not None
+        and not spy_df.empty
+        and len(qqq_df) >= 2
+        and len(spy_df) >= 2
+    ):
+        qqq_return = (float(qqq_df.iloc[-1]["close"]) - float(qqq_df.iloc[-2]["close"])) / float(qqq_df.iloc[-2]["close"])
+        spy_return = (float(spy_df.iloc[-1]["close"]) - float(spy_df.iloc[-2]["close"])) / float(spy_df.iloc[-2]["close"])
+        snapshot["relative_strength"]["qqq_vs_spy"] = round(qqq_return - spy_return, 4)
+
+    if (
+        qqq_df is not None
+        and not qqq_df.empty
+        and qqqe_df is not None
+        and not qqqe_df.empty
+        and len(qqq_df) >= 2
+        and len(qqqe_df) >= 2
+    ):
+        qqqe_return = (float(qqqe_df.iloc[-1]["close"]) - float(qqqe_df.iloc[-2]["close"])) / float(qqqe_df.iloc[-2]["close"])
+        qqq_return = (float(qqq_df.iloc[-1]["close"]) - float(qqq_df.iloc[-2]["close"])) / float(qqq_df.iloc[-2]["close"])
+        snapshot["relative_strength"]["qqqe_vs_qqq"] = round(qqqe_return - qqq_return, 4)
+
+    tech_symbols = [
+        symbol
+        for symbol in ["NVDA", "MSFT", "AAPL", "AMZN", "META", "GOOGL", "AVGO", "TSLA"]
+        if symbol in historical_slice
+    ]
+    strong_count = 0
+    available_count = 0
+    for symbol in tech_symbols:
+        df = historical_slice.get(symbol)
+        if df is None or df.empty or len(df) < 20:
             continue
+        available_count += 1
+        if float(df.iloc[-1]["close"]) >= float(df["close"].tail(20).mean()):
+            strong_count += 1
 
-        # 获取截至当前日期的所有历史数据（不包含未来）
-        historical_slice = {}
-        for symbol, df in normalized_data.items():
-            historical_slice[symbol] = df[df["date"] <= current_date].copy()
-
-        try:
-            # 构建指标快照
-            indicator_snapshot = build_indicator_snapshot(historical_slice)
-
-            # 计算 TQQQ 评分
-            tqqq_result = calculate_tqqq_score(indicator_snapshot)
-            tqqq_base = tqqq_result.get("base_score", 50)
-
-            # 计算 SQQQ 评分
-            sqqq_result = calculate_sqqq_score(indicator_snapshot)
-            sqqq_base = sqqq_result.get("base_score", 50)
-
-            # 计算风险扣分
-            risk_result = get_risk_deduction(str(pd.to_datetime(current_date).date()), indicator_snapshot)
-            risk_score = risk_result.get("deduction", 0)
-
-            # 计算最终评分（扣除风险）
-            tqqq_final = max(0, tqqq_base - risk_score)
-            sqqq_final = max(0, sqqq_base - risk_score)
-
-            # 市场状态判断
-            if tqqq_final >= 75 and sqqq_final < 65:
-                market_state = "BUY_TQQQ_SIGNAL"
-            elif sqqq_final >= 85 and tqqq_final < 65:
-                market_state = "BUY_SQQQ_SIGNAL"
-            elif tqqq_final >= 65:
-                market_state = "BULLISH"
-            elif sqqq_final >= 65:
-                market_state = "BEARISH"
-            else:
-                market_state = "HOLD_CASH"
-
-            results.append(
-                {
-                    "date": current_date,
-                    "tqqq_base_score": tqqq_base,
-                    "sqqq_base_score": sqqq_base,
-                    "risk_score": risk_score,
-                    "tqqq_final_score": tqqq_final,
-                    "sqqq_final_score": sqqq_final,
-                    "market_state": market_state,
-                    "tqqq_reasons": tqqq_result.get("reasons", []),
-                    "sqqq_reasons": sqqq_result.get("reasons", []),
-                }
-            )
-
-        except Exception as e:
-            logger.warning(f"日期 {current_date} 评分计算失败: {e}")
-            continue
-
-    df_scores = pd.DataFrame(results)
-    logger.info(f"生成了 {len(df_scores)} 条历史评分记录")
-    return df_scores
-
-
-def generate_trade_signals(score_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    根据历史评分生成交易信号。
-
-    规则：
-    - TQQQ 信号：TQQQ >= 75 AND SQQQ < 65 → BUY_TQQQ
-    - SQQQ 信号：SQQQ >= 85 AND TQQQ < 65 → BUY_SQQQ
-    - 其他：HOLD_CASH
-
-    返回：
-        DataFrame with columns:
-            date
-            signal
-            tqqq_final_score
-            sqqq_final_score
-            market_state
-    """
-    logger.info("生成交易信号...")
-
-    signals = []
-    for _, row in score_df.iterrows():
-        tqqq_score = row["tqqq_final_score"]
-        sqqq_score = row["sqqq_final_score"]
-
-        # TQQQ 信号规则
-        if tqqq_score >= 75 and sqqq_score < 65:
-            signal = "BUY_TQQQ"
-        # SQQQ 信号规则
-        elif sqqq_score >= 85 and tqqq_score < 65:
-            signal = "BUY_SQQQ"
-        # 默认
+    if available_count > 0:
+        if strong_count / available_count >= 0.6:
+            status = "strong"
+        elif strong_count == 0:
+            status = "weak"
         else:
-            signal = "HOLD_CASH"
+            status = "mixed"
+        snapshot["mega_cap_tech"] = {
+            "status": status,
+            "strong_count": strong_count,
+            "available_count": available_count,
+        }
 
-        signals.append(
+    return snapshot
+
+
+def _resolve_execution_mode(execution_mode: str) -> str:
+    if execution_mode not in SUPPORTED_EXECUTION_MODES:
+        raise ValueError(f"Unsupported execution_mode: {execution_mode}")
+    return execution_mode
+
+
+def _pick_entry_price(price_df: pd.DataFrame, entry_idx: int, execution_mode: str) -> float | None:
+    column = "open" if execution_mode == "close_to_next_open" else "close"
+    if column not in price_df.columns:
+        return None
+    return float(price_df.iloc[entry_idx][column])
+
+
+def _signal_score_from_row(signal: str, row: pd.Series) -> float:
+    if signal == "BUY_TQQQ":
+        return float(row.get("tqqq_score", row.get("tqqq_final_score", 0)) or 0)
+    if signal == "BUY_SQQQ":
+        return float(row.get("sqqq_score", row.get("sqqq_final_score", 0)) or 0)
+    return 0.0
+
+
+def generate_score_history(
+    historical_data: dict[str, pd.DataFrame],
+    mode: str = "close_to_next_open",
+) -> pd.DataFrame:
+    """逐日生成历史评分，且每一天只能使用当天及之前数据。"""
+    del mode
+
+    normalized_data = _normalize_historical_data(historical_data)
+    qqq_df = normalized_data.get("QQQ")
+    if qqq_df is None or qqq_df.empty or len(qqq_df) < MIN_HISTORY_DAYS:
+        logger.warning("历史数据不足，无法生成评分历史")
+        return pd.DataFrame()
+
+    results: list[dict[str, Any]] = []
+    qqq_dates = qqq_df["date"].tolist()
+
+    for current_date in qqq_dates:
+        historical_slice = {
+            symbol: df[df["date"] <= current_date].copy()
+            for symbol, df in normalized_data.items()
+        }
+
+        if len(historical_slice.get("QQQ", pd.DataFrame())) < MIN_HISTORY_DAYS:
+            continue
+
+        indicator_snapshot = _build_indicator_snapshot(historical_slice)
+        tqqq_result = calculate_tqqq_score(indicator_snapshot)
+        sqqq_result = calculate_sqqq_score(indicator_snapshot)
+        risk_result = get_risk_deduction(str(pd.to_datetime(current_date).date()), indicator_snapshot)
+        cache_status = _build_backtest_cache_status(historical_slice)
+        data_quality = assess_data_quality(historical_slice, cache_status)
+
+        tqqq_base = float(tqqq_result.get("base_score", 0) or 0)
+        sqqq_base = float(sqqq_result.get("base_score", 0) or 0)
+        risk_score = float(risk_result.get("deduction", 0) or 0)
+        tqqq_final = calculate_final_score(tqqq_base, risk_score)
+        sqqq_final = calculate_final_score(sqqq_base, risk_score)
+        market_state = classify_overall_market_state(tqqq_final, sqqq_final)
+
+        results.append(
             {
-                "date": row["date"],
-                "signal": signal,
-                "tqqq_final_score": tqqq_score,
-                "sqqq_final_score": sqqq_score,
-                "market_state": row["market_state"],
+                "date": pd.to_datetime(current_date),
+                "tqqq_base_score": tqqq_base,
+                "sqqq_base_score": sqqq_base,
+                "risk_score": risk_score,
+                "tqqq_score": tqqq_final,
+                "sqqq_score": sqqq_final,
+                "tqqq_final_score": tqqq_final,
+                "sqqq_final_score": sqqq_final,
+                "market_state": market_state,
+                "data_quality_level": data_quality.get("quality_level", "poor"),
+                "data_quality_score": data_quality.get("quality_score", 0),
+                "risk_events": risk_result.get("events", []),
             }
         )
 
-    df_signals = pd.DataFrame(signals)
-    logger.info(f"生成了 {len(df_signals)} 条交易信号")
-    logger.info(
-        f"  - BUY_TQQQ: {(df_signals['signal'] == 'BUY_TQQQ').sum()}")
-    logger.info(
-        f"  - BUY_SQQQ: {(df_signals['signal'] == 'BUY_SQQQ').sum()}")
-    logger.info(
-        f"  - HOLD_CASH: {(df_signals['signal'] == 'HOLD_CASH').sum()}")
+    return pd.DataFrame(results)
 
-    return df_signals
+
+def generate_historical_scores(historical_data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Backward-compatible alias for the old API."""
+    return generate_score_history(historical_data, mode="close_to_next_open")
+
+
+def generate_trade_signals(score_df: pd.DataFrame) -> pd.DataFrame:
+    """根据评分生成交易信号。"""
+    if score_df is None or score_df.empty:
+        return pd.DataFrame(
+            columns=["date", "signal", "tqqq_score", "sqqq_score", "data_quality_level", "market_state"]
+        )
+
+    tqqq_threshold = float(BACKTEST_PARAMS.get("tqqq_entry_score", BACKTEST_PARAMS.get("tqqq_signal_threshold", 75)))
+    sqqq_threshold = float(BACKTEST_PARAMS.get("sqqq_entry_score", BACKTEST_PARAMS.get("sqqq_signal_threshold", 85)))
+    tqqq_block = float(BACKTEST_PARAMS.get("tqqq_sqqq_threshold", 65))
+    sqqq_block = float(BACKTEST_PARAMS.get("sqqq_tqqq_threshold", 65))
+
+    records: list[dict[str, Any]] = []
+    for _, row in score_df.iterrows():
+        tqqq_score = float(row.get("tqqq_score", row.get("tqqq_final_score", 0)) or 0)
+        sqqq_score = float(row.get("sqqq_score", row.get("sqqq_final_score", 0)) or 0)
+
+        if tqqq_score >= tqqq_threshold and sqqq_score < tqqq_block:
+            signal = "BUY_TQQQ"
+        elif sqqq_score >= sqqq_threshold and tqqq_score < sqqq_block:
+            signal = "BUY_SQQQ"
+        else:
+            signal = "HOLD_CASH"
+
+        records.append(
+            {
+                "date": pd.to_datetime(row["date"]),
+                "signal": signal,
+                "tqqq_score": tqqq_score,
+                "sqqq_score": sqqq_score,
+                "data_quality_level": row.get("data_quality_level", "poor"),
+                "market_state": row.get("market_state", "未知"),
+            }
+        )
+
+    return pd.DataFrame(records)
 
 
 def simulate_trades(
     signals_df: pd.DataFrame,
     price_data: dict[str, pd.DataFrame],
-    tqqq_take_profit: float = 0.06,
-    tqqq_stop_loss: float = -0.03,
-    sqqq_take_profit: float = 0.05,
-    sqqq_stop_loss: float = -0.03,
-    transaction_cost: float = 0.001,
+    execution_mode: str = "close_to_next_open",
 ) -> pd.DataFrame:
-    """
-    根据交易信号模拟交易。
+    """模拟交易，严格使用下一根可交易日价格执行。"""
+    execution_mode = _resolve_execution_mode(execution_mode)
+    if signals_df is None or signals_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "signal_date",
+                "entry_date",
+                "exit_date",
+                "symbol",
+                "entry_price",
+                "exit_price",
+                "return_pct",
+                "exit_reason",
+                "holding_days",
+                "signal_score",
+                "data_quality_level",
+                "execution_mode",
+            ]
+        )
 
-    规则：
-    - TQQQ: 最多持有3个交易日，止盈6%，止损-3%
-    - SQQQ: 最多持有2个交易日，止盈5%，止损-3%
-    - 交易成本：每笔0.1%
+    transaction_cost = float(BACKTEST_PARAMS.get("transaction_cost", 0.001) or 0.001)
+    price_frames = {
+        symbol: _normalize_price_frame(price_data.get(symbol))
+        for symbol in ["TQQQ", "SQQQ"]
+    }
+    price_frames = {symbol: df for symbol, df in price_frames.items() if not df.empty}
 
-    参数：
-        signals_df: 信号 DataFrame（带 date 和 signal）
-        price_data: {'TQQQ': df, 'SQQQ': df, ...} 包含价格数据
-        tqqq_take_profit: TQQQ 止盈比例（默认0.06 = 6%）
-        tqqq_stop_loss: TQQQ 止损比例（默认-0.03 = -3%）
-        sqqq_take_profit: SQQQ 止盈比例（默认0.05 = 5%）
-        sqqq_stop_loss: SQQQ 止损比例（默认-0.03 = -3%）
-        transaction_cost: 交易成本（默认0.001 = 0.1%）
-
-    返回：
-        DataFrame with columns:
-            entry_date
-            exit_date
-            symbol
-            entry_price
-            exit_price
-            return_pct
-            exit_reason
-            holding_days
-    """
-    logger.info("模拟交易...")
-
-    trades = []
-
-    price_frames: dict[str, pd.DataFrame] = {}
-    for symbol in ["TQQQ", "SQQQ"]:
-        if symbol not in price_data or price_data[symbol] is None or price_data[symbol].empty:
-            continue
-        df_symbol = price_data[symbol].copy()
-        if "date" not in df_symbol.columns:
-            continue
-        df_symbol["date"] = pd.to_datetime(df_symbol["date"], errors="coerce")
-        df_symbol = df_symbol.dropna(subset=["date"]).sort_values("date")
-        price_frames[symbol] = df_symbol.set_index("date", drop=False)
-
-    if "TQQQ" not in price_frames:
-        return pd.DataFrame()
-
-    dates_list = price_frames["TQQQ"]["date"].tolist()
+    trades: list[dict[str, Any]] = []
+    last_exit_date: pd.Timestamp | None = None
 
     for _, row in signals_df.iterrows():
-        signal_date = pd.to_datetime(row["date"], errors="coerce")
-        if pd.isna(signal_date):
+        signal_date = pd.to_datetime(row.get("date"), errors="coerce")
+        signal = row.get("signal")
+        if pd.isna(signal_date) or signal not in {"BUY_TQQQ", "BUY_SQQQ"}:
             continue
-        signal = row["signal"]
-
-        # 找到信号日期在价格数据中的位置
-        if signal_date not in dates_list:
+        if last_exit_date is not None and signal_date <= last_exit_date:
             continue
 
-        signal_idx = dates_list.index(signal_date)
-
-        # 次日开盘买入
-        entry_idx = signal_idx + 1
-        if entry_idx >= len(dates_list):
+        symbol = "TQQQ" if signal == "BUY_TQQQ" else "SQQQ"
+        price_df = price_frames.get(symbol)
+        if price_df is None or price_df.empty or not all(column in price_df.columns for column in REQUIRED_DAILY_COLUMNS):
             continue
 
-        entry_date = dates_list[entry_idx]
-
-        if signal == "BUY_TQQQ":
-            symbol = "TQQQ"
-            take_profit = tqqq_take_profit
-            stop_loss = tqqq_stop_loss
-            max_holding_days = 3
-
-        elif signal == "BUY_SQQQ":
-            symbol = "SQQQ"
-            take_profit = sqqq_take_profit
-            stop_loss = sqqq_stop_loss
-            max_holding_days = 2
-
-        else:  # HOLD_CASH
+        future_rows = price_df[price_df["date"] > signal_date].reset_index(drop=True)
+        if future_rows.empty:
             continue
 
-        # 获取入场价格（次日开盘 = 当日收盘价的近似）
-        try:
-            entry_price = price_frames[symbol].loc[entry_date, "open"]
-        except KeyError:
+        entry_row = future_rows.iloc[0]
+        entry_date = pd.to_datetime(entry_row["date"])
+        entry_idx = int(price_df.index[price_df["date"] == entry_date][0])
+        entry_price = _pick_entry_price(price_df, entry_idx, execution_mode)
+        if entry_price in {None, 0}:
             continue
 
-        # 模拟持有期间的交易
-        exit_idx = entry_idx
-        exit_date = entry_date
-        exit_price = entry_price
-        exit_reason = "Unknown"
-        holding_days = 0
+        if symbol == "TQQQ":
+            take_profit = float(BACKTEST_PARAMS.get("tqqq_take_profit", 0.06))
+            stop_loss = float(BACKTEST_PARAMS.get("tqqq_stop_loss", -0.03))
+            max_holding_days = int(
+                BACKTEST_PARAMS.get("max_holding_days_tqqq", BACKTEST_PARAMS.get("tqqq_max_holding_days", 3))
+            )
+        else:
+            take_profit = float(BACKTEST_PARAMS.get("sqqq_take_profit", 0.05))
+            stop_loss = float(BACKTEST_PARAMS.get("sqqq_stop_loss", -0.03))
+            max_holding_days = int(
+                BACKTEST_PARAMS.get("max_holding_days_sqqq", BACKTEST_PARAMS.get("sqqq_max_holding_days", 2))
+            )
 
-        for hold_day in range(1, max_holding_days + 1):
-            check_idx = entry_idx + hold_day
-            if check_idx >= len(dates_list):
-                # 超出数据范围，按最后数据卖出
-                exit_idx = len(dates_list) - 1
-                exit_date = dates_list[exit_idx]
-                exit_price = price_frames[symbol].iloc[exit_idx]["close"]
-                exit_reason = "DataEnd"
-                holding_days = hold_day
-                break
+        exit_reason = "TimeOut"
+        exit_idx = min(entry_idx + max_holding_days - 1, len(price_df) - 1)
+        evaluation_start = entry_idx if execution_mode == "close_to_next_open" else entry_idx + 1
 
-            check_date = dates_list[check_idx]
-            check_price = price_frames[symbol].loc[check_date, "close"]
-
-            # 计算收益率（考虑交易成本）
-            raw_return = (check_price - entry_price) / entry_price
-            net_return = (
-                raw_return - transaction_cost
-            )  # 入场和出场各扣除成本
-
-            # 检查止盈
+        for check_idx in range(evaluation_start, min(entry_idx + max_holding_days, len(price_df))):
+            close_price = float(price_df.iloc[check_idx]["close"])
+            raw_return = (close_price - entry_price) / entry_price
             if raw_return >= take_profit:
                 exit_idx = check_idx
-                exit_date = check_date
-                exit_price = check_price
                 exit_reason = "TakeProfit"
-                holding_days = hold_day
                 break
-
-            # 检查止损
             if raw_return <= stop_loss:
                 exit_idx = check_idx
-                exit_date = check_date
-                exit_price = check_price
                 exit_reason = "StopLoss"
-                holding_days = hold_day
                 break
 
-        # 如果未触发止盈/止损，按最后日期卖出
-        if exit_reason == "Unknown":
-            exit_date = dates_list[exit_idx]
-            exit_price = price_frames[symbol].loc[exit_date, "close"]
-            exit_reason = "TimeOut"
-            holding_days = max_holding_days
-
-        # 计算最终收益率（扣除往返交易成本）
+        exit_row = price_df.iloc[exit_idx]
+        exit_date = pd.to_datetime(exit_row["date"])
+        exit_price = float(exit_row["close"])
+        holding_days = max(1, exit_idx - entry_idx + 1)
         raw_return = (exit_price - entry_price) / entry_price
-        return_pct = raw_return - 2 * transaction_cost  # 入场和出场各扣除成本
+        return_pct = raw_return - 2 * transaction_cost
+        signal_score = _signal_score_from_row(signal, row)
 
         trades.append(
             {
+                "signal_date": signal_date,
                 "entry_date": entry_date,
                 "exit_date": exit_date,
                 "symbol": symbol,
-                "entry_price": round(entry_price, 2),
-                "exit_price": round(exit_price, 2),
+                "entry_price": round(entry_price, 4),
+                "exit_price": round(exit_price, 4),
                 "return_pct": round(return_pct, 4),
                 "exit_reason": exit_reason,
                 "holding_days": holding_days,
+                "signal_score": round(signal_score, 2),
+                "data_quality_level": row.get("data_quality_level", "poor"),
+                "execution_mode": execution_mode,
             }
         )
+        last_exit_date = exit_date
 
-    df_trades = pd.DataFrame(trades)
-    logger.info(f"生成了 {len(df_trades)} 笔交易记录")
-
-    return df_trades
+    return pd.DataFrame(trades)
 
 
-def calculate_backtest_metrics(trades_df: pd.DataFrame) -> dict:
-    """
-    计算回测指标。
-
-    指标包括：
-    - total_trades: 总交易笔数
-    - win_rate: 胜率
-    - avg_win: 平均盈利
-    - avg_loss: 平均亏损
-    - profit_factor: 盈亏比
-    - avg_return: 平均收益率
-    - max_drawdown: 最大回撤
-    - consecutive_losses: 连续亏损次数
-    - avg_holding_days: 平均持仓天数
-    - cumulative_return: 累计收益率
-    """
-    if trades_df.empty:
-        logger.warning("交易数据为空，无法计算回测指标")
-        return {}
-
-    total_trades = len(trades_df)
-    winning_trades = trades_df[trades_df["return_pct"] > 0]
-    losing_trades = trades_df[trades_df["return_pct"] <= 0]
-
-    win_count = len(winning_trades)
-    loss_count = len(losing_trades)
-
-    win_rate = win_count / total_trades if total_trades > 0 else 0.0
-    avg_win = winning_trades["return_pct"].mean() if len(winning_trades) > 0 else 0.0
-    avg_loss = (
-        losing_trades["return_pct"].mean() if len(losing_trades) > 0 else 0.0
-    )
-
-    # 盈亏比 = 总盈利 / 总亏损（绝对值）
-    total_profit = winning_trades["return_pct"].sum()
-    total_loss = abs(losing_trades["return_pct"].sum())
-    profit_factor = (
-        total_profit / total_loss if total_loss > 0 else (1.0 if total_profit > 0 else 0.0)
-    )
-
-    avg_return = trades_df["return_pct"].mean()
-    avg_holding_days = trades_df["holding_days"].mean()
-
-    # 最大回撤：从最高点开始下跌的最大幅度
-    cumulative_returns = (1 + trades_df["return_pct"]).cumprod()
-    running_max = cumulative_returns.expanding().max()
-    drawdown = (cumulative_returns - running_max) / running_max
-    max_drawdown = drawdown.min()
-
-    # 连续亏损次数
-    consecutive_losses = 0
-    current_consecutive = 0
-    for ret in trades_df["return_pct"]:
-        if ret <= 0:
-            current_consecutive += 1
-            consecutive_losses = max(consecutive_losses, current_consecutive)
-        else:
-            current_consecutive = 0
-
-    # 累计收益率
-    cumulative_return = (cumulative_returns.iloc[-1] - 1) if not cumulative_returns.empty else 0.0
-
-    metrics = {
-        "total_trades": total_trades,
-        "win_count": win_count,
-        "loss_count": loss_count,
-        "win_rate": round(win_rate, 4),
-        "avg_win": round(avg_win, 4),
-        "avg_loss": round(avg_loss, 4),
-        "profit_factor": round(profit_factor, 4),
-        "avg_return": round(avg_return, 4),
-        "max_drawdown": round(max_drawdown, 4),
-        "consecutive_losses": consecutive_losses,
-        "avg_holding_days": round(avg_holding_days, 2),
-        "cumulative_return": round(cumulative_return, 4),
+def _empty_metrics() -> dict[str, Any]:
+    return {
+        "total_trades": 0,
+        "win_rate": 0.0,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "profit_factor": 0.0,
+        "avg_return": 0.0,
+        "max_drawdown": 0.0,
+        "max_consecutive_losses": 0,
+        "avg_holding_days": 0.0,
+        "cash_days_ratio": 1.0,
+        "signal_frequency": 0.0,
+        "tqqq_trade_count": 0,
+        "sqqq_trade_count": 0,
+        "tqqq_avg_return": 0.0,
+        "sqqq_avg_return": 0.0,
     }
 
-    logger.info("回测指标计算完成：")
-    logger.info(f"  - 总交易数: {metrics['total_trades']}")
-    logger.info(f"  - 胜率: {metrics['win_rate'] * 100:.2f}%")
-    logger.info(f"  - 平均盈利: {metrics['avg_win'] * 100:.2f}%")
-    logger.info(f"  - 平均亏损: {metrics['avg_loss'] * 100:.2f}%")
-    logger.info(f"  - 盈亏比: {metrics['profit_factor']:.2f}")
-    logger.info(f"  - 累计收益: {metrics['cumulative_return'] * 100:.2f}%")
-    logger.info(f"  - 最大回撤: {metrics['max_drawdown'] * 100:.2f}%")
 
-    return metrics
+def calculate_backtest_metrics(trades_df: pd.DataFrame) -> dict[str, Any]:
+    """计算回测指标。"""
+    if trades_df is None or trades_df.empty:
+        return _empty_metrics()
+
+    working_df = trades_df.sort_values("entry_date").reset_index(drop=True)
+    wins = working_df[working_df["return_pct"] > 0]
+    losses = working_df[working_df["return_pct"] <= 0]
+    total_profit = float(wins["return_pct"].sum()) if not wins.empty else 0.0
+    total_loss = abs(float(losses["return_pct"].sum())) if not losses.empty else 0.0
+    cumulative = (1 + working_df["return_pct"]).cumprod()
+    drawdown = cumulative / cumulative.cummax() - 1
+
+    max_consecutive_losses = 0
+    current_losses = 0
+    for value in working_df["return_pct"]:
+        if value <= 0:
+            current_losses += 1
+            max_consecutive_losses = max(max_consecutive_losses, current_losses)
+        else:
+            current_losses = 0
+
+    covered_days = max(
+        1,
+        (pd.to_datetime(working_df["exit_date"].max()) - pd.to_datetime(working_df["entry_date"].min())).days + 1,
+    )
+    invested_days = int(working_df["holding_days"].sum())
+    total_trades = len(working_df)
+    tqqq_trades = working_df[working_df["symbol"] == "TQQQ"]
+    sqqq_trades = working_df[working_df["symbol"] == "SQQQ"]
+
+    return {
+        "total_trades": total_trades,
+        "win_rate": round(len(wins) / total_trades, 4),
+        "avg_win": round(float(wins["return_pct"].mean()) if not wins.empty else 0.0, 4),
+        "avg_loss": round(float(losses["return_pct"].mean()) if not losses.empty else 0.0, 4),
+        "profit_factor": round(total_profit / total_loss, 4) if total_loss > 0 else round(float(total_profit > 0), 4),
+        "avg_return": round(float(working_df["return_pct"].mean()), 4),
+        "max_drawdown": round(float(drawdown.min()) if not drawdown.empty else 0.0, 4),
+        "max_consecutive_losses": max_consecutive_losses,
+        "avg_holding_days": round(float(working_df["holding_days"].mean()), 2),
+        "cash_days_ratio": round(max(0.0, min(1.0, 1 - invested_days / covered_days)), 4),
+        "signal_frequency": round(total_trades / covered_days, 4),
+        "tqqq_trade_count": int(len(tqqq_trades)),
+        "sqqq_trade_count": int(len(sqqq_trades)),
+        "tqqq_avg_return": round(float(tqqq_trades["return_pct"].mean()) if not tqqq_trades.empty else 0.0, 4),
+        "sqqq_avg_return": round(float(sqqq_trades["return_pct"].mean()) if not sqqq_trades.empty else 0.0, 4),
+    }
+
+
+def analyze_score_buckets(trades_df: pd.DataFrame) -> pd.DataFrame:
+    """分析不同评分区间的交易表现。"""
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame(columns=["score_bucket", "trade_count", "win_rate", "avg_return"])
+
+    working_df = trades_df.copy()
+    bins = [0, 65, 75, 85, float("inf")]
+    labels = ["<65", "65-75", "75-85", "85+"]
+    working_df["score_bucket"] = pd.cut(working_df["signal_score"], bins=bins, labels=labels, right=False)
+
+    return (
+        working_df.groupby("score_bucket", observed=False)
+        .agg(
+            trade_count=("return_pct", "count"),
+            win_rate=("return_pct", lambda values: round((values > 0).mean(), 4) if len(values) else 0.0),
+            avg_return=("return_pct", "mean"),
+        )
+        .reset_index()
+        .fillna({"avg_return": 0.0, "win_rate": 0.0})
+    )
+
+
+def analyze_quality_buckets(trades_df: pd.DataFrame) -> pd.DataFrame:
+    """分析不同数据质量等级下的交易表现。"""
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame(columns=["data_quality_level", "trade_count", "win_rate", "avg_return"])
+
+    return (
+        trades_df.groupby("data_quality_level")
+        .agg(
+            trade_count=("return_pct", "count"),
+            win_rate=("return_pct", lambda values: round((values > 0).mean(), 4) if len(values) else 0.0),
+            avg_return=("return_pct", "mean"),
+        )
+        .reset_index()
+        .fillna({"avg_return": 0.0, "win_rate": 0.0})
+    )
 
 
 def run_backtest(
     start_date: str | None = None,
     end_date: str | None = None,
     symbols: list[str] | None = None,
-) -> dict:
-    """
-    执行完整回测流程。
+    execution_mode: str = "close_to_next_open",
+) -> dict[str, Any]:
+    """执行完整回测流程。"""
+    execution_mode = _resolve_execution_mode(execution_mode)
+    warnings: list[str] = []
 
-    参数：
-        start_date: 回测开始日期（格式: 'YYYY-MM-DD'），默认None表示最早数据
-        end_date: 回测结束日期（格式: 'YYYY-MM-DD'），默认None表示最新数据
-        symbols: 要回测的符号列表，默认['QQQ', 'SPY', 'QQQE', 'TQQQ', 'SQQQ', ...]
-
-    返回：
-        {
-            'status': 'success' | 'error',
-            'message': str,
-            'historical_scores': DataFrame,
-            'trade_signals': DataFrame,
-            'trades': DataFrame,
-            'metrics': dict,
-            'start_date': str,
-            'end_date': str,
-        }
-    """
     if symbols is None:
-        symbols = ["QQQ", "SPY", "QQQE", "TQQQ", "SQQQ", "NVDA", "MSFT"]
+        symbols = ["QQQ", "SPY", "QQQE", "TQQQ", "SQQQ", "NVDA", "MSFT", "AAPL", "AMZN"]
 
-    logger.info("开始执行回测流程...")
-    logger.info(f"回测符号: {symbols}")
-    logger.info(f"回测时间段: {start_date} to {end_date}")
+    historical_data: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        df = fetch_daily_data(symbol, period="5y")
+        normalized_df = _normalize_price_frame(df)
+        if normalized_df.empty:
+            warnings.append(f"{symbol} 历史数据缺失，已跳过。")
+            continue
+        if start_date:
+            normalized_df = normalized_df[normalized_df["date"] >= pd.to_datetime(start_date)]
+        if end_date:
+            normalized_df = normalized_df[normalized_df["date"] <= pd.to_datetime(end_date)]
+        if not normalized_df.empty:
+            historical_data[symbol] = normalized_df.reset_index(drop=True)
 
-    try:
-        # 1. 获取历史数据
-        logger.info("Step 1: 抓取历史数据...")
-        historical_data = {}
-
-        for symbol in symbols:
-            logger.info(f"  抓取 {symbol} 数据...")
-            df = fetch_daily_data(symbol, period="5y")
-
-            if df.empty:
-                logger.warning(f"  {symbol} 数据获取失败，跳过")
-                continue
-
-            if "date" not in df.columns:
-                logger.warning(f"  {symbol} 缺少 date 列，跳过")
-                continue
-
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-
-            # 按日期范围筛选
-            if start_date:
-                df = df[df["date"] >= pd.to_datetime(start_date)]
-            if end_date:
-                df = df[df["date"] <= pd.to_datetime(end_date)]
-
-            historical_data[symbol] = df
-
-        if not historical_data:
-            return {
-                "status": "error",
-                "message": "无法获取任何历史数据",
-                "historical_scores": pd.DataFrame(),
-                "trade_signals": pd.DataFrame(),
-                "trades": pd.DataFrame(),
-                "metrics": {},
-            }
-
-        # 2. 生成历史评分
-        logger.info("Step 2: 生成历史评分...")
-        df_scores = generate_historical_scores(historical_data)
-
-        if df_scores.empty:
-            return {
-                "status": "error",
-                "message": "无法生成历史评分，历史数据不足",
-                "historical_scores": df_scores,
-                "trade_signals": pd.DataFrame(),
-                "trades": pd.DataFrame(),
-                "metrics": {},
-            }
-
-        # 3. 生成交易信号
-        logger.info("Step 3: 生成交易信号...")
-        df_signals = generate_trade_signals(df_scores)
-
-        # 4. 模拟交易
-        logger.info("Step 4: 模拟交易...")
-        df_trades = simulate_trades(df_signals, historical_data)
-
-        # 5. 计算回测指标
-        logger.info("Step 5: 计算回测指标...")
-        metrics = calculate_backtest_metrics(df_trades)
-
-        # 获取实际的日期范围
-        actual_start = df_scores["date"].min()
-        actual_end = df_scores["date"].max()
-
-        logger.info("回测流程完成！")
-
-        return {
-            "status": "success",
-            "message": "回测完成",
-            "historical_scores": df_scores,
-            "trade_signals": df_signals,
-            "trades": df_trades,
-            "metrics": metrics,
-            "start_date": str(actual_start),
-            "end_date": str(actual_end),
-        }
-
-    except Exception as e:
-        logger.error(f"回测过程中出错: {e}", exc_info=True)
+    if not historical_data:
         return {
             "status": "error",
-            "message": f"回测失败: {str(e)}",
-            "historical_scores": pd.DataFrame(),
-            "trade_signals": pd.DataFrame(),
+            "message": "无法获取任何历史数据",
+            "metrics": _empty_metrics(),
             "trades": pd.DataFrame(),
-            "metrics": {},
+            "score_bucket_analysis": pd.DataFrame(),
+            "quality_bucket_analysis": pd.DataFrame(),
+            "warnings": warnings,
         }
+
+    score_history = generate_score_history(historical_data, mode=execution_mode)
+    if score_history.empty:
+        warnings.append("历史评分为空，可能是样本窗口不足。")
+        return {
+            "status": "error",
+            "message": "无法生成历史评分",
+            "metrics": _empty_metrics(),
+            "trades": pd.DataFrame(),
+            "score_bucket_analysis": pd.DataFrame(),
+            "quality_bucket_analysis": pd.DataFrame(),
+            "warnings": warnings,
+        }
+
+    signals_df = generate_trade_signals(score_history)
+    trades_df = simulate_trades(signals_df, historical_data, execution_mode=execution_mode)
+    if trades_df.empty:
+        warnings.append("本次回测没有生成任何交易。")
+
+    metrics = calculate_backtest_metrics(trades_df)
+    score_bucket_df = analyze_score_buckets(trades_df)
+    quality_bucket_df = analyze_quality_buckets(trades_df)
+
+    return {
+        "status": "success",
+        "message": "回测完成",
+        "metrics": metrics,
+        "trades": trades_df,
+        "score_bucket_analysis": score_bucket_df,
+        "quality_bucket_analysis": quality_bucket_df,
+        "warnings": warnings,
+        "historical_scores": score_history,
+        "trade_signals": signals_df,
+        "execution_mode": execution_mode,
+    }

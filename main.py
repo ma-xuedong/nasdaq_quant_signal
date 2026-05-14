@@ -82,6 +82,23 @@ def print_futures_and_breadth(result: dict) -> None:
         print("Breadth snapshot unavailable")
 
 
+def print_event_risk(result: dict) -> None:
+    """Print event risk calendar summary from pipeline output."""
+    event_risk_snapshot = result.get("event_risk_snapshot", {})
+
+    print_section("Event Risk")
+    if not event_risk_snapshot:
+        print("Event risk snapshot unavailable")
+        return
+
+    print(
+        f"today_events={event_risk_snapshot.get('today_event_count', 0)}, "
+        f"upcoming_events={event_risk_snapshot.get('upcoming_event_count', 0)}, "
+        f"risk_level={event_risk_snapshot.get('risk_level', 'low')}, "
+        f"deduction={safe_get_number(event_risk_snapshot, 'deduction'):.0f}"
+    )
+
+
 def main() -> None:
     """Run the main signal pipeline and print a console report."""
     print("====== TQQQ / SQQQ Signal Report ======")
@@ -121,6 +138,7 @@ def main() -> None:
     print(f"Market State: {result.get('market_state', '未知')}")
 
     print_futures_and_breadth(result)
+    print_event_risk(result)
 
     print_section("Data Quality")
     print(

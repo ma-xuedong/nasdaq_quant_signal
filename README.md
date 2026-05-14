@@ -210,14 +210,15 @@ SQLite 数据持久化：
 ### 6. 回测系统（src/backtest.py）
 
 完整的历史回测实现：
-- `generate_historical_scores()` - 逐日生成历史评分（避免未来函数）
+- `generate_score_history()` - 逐日生成历史评分（避免未来函数）
 - `generate_trade_signals()` - 根据评分生成交易信号
-- `simulate_trades()` - 模拟交易执行（支持止盈/止损）
+- `simulate_trades()` - 模拟交易执行（支持 close_to_next_open / close_to_next_close）
 - `calculate_backtest_metrics()` - 计算胜率、盈亏比等指标
 - `run_backtest()` - 完整的回测流程
 
 **关键特性**：
 - ✓ 无未来函数：每日信号仅使用当日及之前的数据
+- ✓ 执行时点清晰：收盘信号只能在下一交易日开盘或收盘执行
 - ✓ 保守估计：考虑 0.1% 的往返交易成本
 - ✓ 完整的交易模拟：支持止盈、止损、时间到期三种退出方式
 - ✓ 详细的统计指标：胜率、平均盈利/亏损、最大回撤等
@@ -373,6 +374,7 @@ python test_rate_limiter.py
 - 请严格控制仓位和风险，设置好止损
 - 历史回测表现不代表未来结果
 - 回测结果仅用于策略研究，需要样本外验证
+- 回测结果仅用于策略研究，不代表未来收益，不构成投资建议
 
 ## 免责声明
 

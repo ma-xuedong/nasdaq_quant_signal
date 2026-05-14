@@ -114,6 +114,7 @@ def generate_market_summary(
     final_scores: dict,
     futures_snapshot: dict | None = None,
     breadth_snapshot: dict | None = None,
+    event_risk_snapshot: dict | None = None,
 ) -> str:
     """
     生成中文市场解释。
@@ -224,6 +225,27 @@ def generate_market_summary(
             )
         else:
             summary_lines.append("  市场宽度可用成分股不足，宽度判断可信度下降。")
+        summary_lines.append("")
+
+        summary_lines.append("【事件风险日历】")
+        event_risk_snapshot = event_risk_snapshot or {}
+        today_events = event_risk_snapshot.get("today_events", [])
+        upcoming_events = event_risk_snapshot.get("upcoming_events", [])
+        if today_events:
+            labels = [event.get("label") or event.get("type") or "事件" for event in today_events]
+            summary_lines.append(
+                f"  今日事件风险等级为 {event_risk_snapshot.get('risk_level', 'low')}，"
+                f"共 {len(today_events)} 项事件，预计扣分 {event_risk_snapshot.get('deduction', 0):.0f} 分。"
+            )
+            summary_lines.append(f"  重点事件：{', '.join(labels[:3])}。")
+        elif upcoming_events:
+            next_event = upcoming_events[0]
+            summary_lines.append(
+                f"  今日无重大事件，下一项重点事件为 {next_event.get('date', '-') } 的 "
+                f"{next_event.get('label') or next_event.get('type') or '事件'}。"
+            )
+        else:
+            summary_lines.append("  当前本地事件日历未配置当日或近期重大事件。")
         summary_lines.append("")
 
         # 6. 结论
