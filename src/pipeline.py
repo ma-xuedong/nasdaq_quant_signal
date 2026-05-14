@@ -28,6 +28,7 @@ from src.market_state import classify_overall_market_state, generate_market_summ
 from src.risk_filter import get_risk_deduction
 from src.rate_limiter import sleep_between_requests
 from src.scoring import calculate_final_score, calculate_sqqq_score, calculate_tqqq_score
+from src.snapshot_builder import build_scoring_snapshot
 from src.utils import setup_logger
 
 logger = setup_logger("pipeline")
@@ -126,11 +127,23 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
 
     data_source_status = dict(cache_status)
 
-    data_quality = assess_data_quality(daily_data=daily_data, cache_status=cache_status)
+    indicator_snapshot = build_scoring_snapshot(
+        {
+            "daily_data": daily_data,
+            "intraday_data": intraday_data,
+            "cache_status": cache_status,
+            "data_source_status": data_source_status,
+            "min_required_symbols": BREADTH_MIN_REQUIRED_SYMBOLS,
+        },
+        current_date=now,
+        mode="live",
+    )
+
+    data_quality = indicator_snapshot.get("data_quality", assess_data_quality(daily_data=daily_data, cache_status=cache_status))
     warnings.extend(data_quality.get("warnings", []))
     is_test_mode = bool(data_quality.get("is_test_mode", False))
     is_realtime_usable = bool(data_quality.get("is_realtime_usable", False))
-    event_risk_snapshot = build_event_risk_snapshot(now_str)
+    event_risk_snapshot = indicator_snapshot.get("event_risk_snapshot", build_event_risk_snapshot(now_str))
 
     if daily_data.get("QQQ") is None or daily_data.get("QQQ").empty:
         return {
@@ -146,30 +159,9 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
             "warnings": warnings,
         }
 
-    indicator_snapshot = build_indicator_snapshot(daily_data, intraday_data)
-
-    qqq_atr = indicator_snapshot.get("qqq", {}).get("atr14")
-    qqq_price = indicator_snapshot.get("qqq", {}).get("price")
-    qqq_atr_pct = None
-    if qqq_atr not in {None, 0} and qqq_price not in {None, 0}:
-        qqq_atr_pct = float(qqq_atr) / float(qqq_price)
-
-    futures_snapshot = build_futures_snapshot(
-        futures_data={
-            FUTURES_SYMBOLS["NQ"]: daily_data.get(FUTURES_SYMBOLS["NQ"], None),
-            FUTURES_SYMBOLS["ES"]: daily_data.get(FUTURES_SYMBOLS["ES"], None),
-            FUTURES_SYMBOLS["MNQ"]: daily_data.get(FUTURES_SYMBOLS["MNQ"], None),
-            FUTURES_SYMBOLS["MES"]: daily_data.get(FUTURES_SYMBOLS["MES"], None),
-        },
-        qqq_atr_pct=qqq_atr_pct,
-        data_source_status=data_source_status,
-    )
-
+    futures_snapshot = indicator_snapshot.get("futures_snapshot", {})
+    breadth_snapshot = indicator_snapshot.get("breadth_snapshot", {})
     breadth_symbols = NASDAQ100_SYMBOLS[:MAX_BREADTH_SYMBOLS]
-    breadth_snapshot = build_breadth_snapshot(
-        symbol_data={symbol: daily_data.get(symbol) for symbol in breadth_symbols},
-        min_required_symbols=min(BREADTH_MIN_REQUIRED_SYMBOLS, len(breadth_symbols)),
-    )
 
     if len(breadth_symbols) < len(NASDAQ100_SYMBOLS):
         breadth_snapshot.setdefault("warnings", []).append("当前仅使用部分 Nasdaq-100 成分股计算市场宽度。")
@@ -190,6 +182,7 @@ def run_signal_pipeline(save_to_db: bool = True, use_cache: bool = True) -> dict
     indicator_snapshot["futures_snapshot"] = futures_snapshot
     indicator_snapshot["breadth_snapshot"] = breadth_snapshot
     indicator_snapshot["event_risk_snapshot"] = event_risk_snapshot
+    indicator_snapshot["data_quality"] = data_quality
 
     tqqq_result = calculate_tqqq_score(indicator_snapshot)
     sqqq_result = calculate_sqqq_score(indicator_snapshot)

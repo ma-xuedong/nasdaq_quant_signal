@@ -12,6 +12,7 @@ from src.data_quality import assess_data_quality
 from src.market_state import classify_overall_market_state
 from src.risk_filter import get_risk_deduction
 from src.scoring import calculate_final_score, calculate_sqqq_score, calculate_tqqq_score
+from src.snapshot_builder import build_scoring_snapshot
 from src.utils import setup_logger
 
 logger = setup_logger("backtest")
@@ -68,86 +69,20 @@ def _build_backtest_cache_status(historical_slice: dict[str, pd.DataFrame]) -> d
 
 
 def _build_indicator_snapshot(historical_slice: dict[str, pd.DataFrame]) -> dict[str, Any]:
-    qqq_df = historical_slice.get("QQQ")
-    spy_df = historical_slice.get("SPY")
-    qqqe_df = historical_slice.get("QQQE")
+    qqq_df = historical_slice.get("QQQ", pd.DataFrame())
+    current_date = None
+    if qqq_df is not None and not qqq_df.empty and "date" in qqq_df.columns:
+        current_date = pd.to_datetime(qqq_df["date"], errors="coerce").dropna().max()
 
-    snapshot: dict[str, Any] = {
-        "qqq": {},
-        "relative_strength": {},
-        "mega_cap_tech": {"status": "mixed", "strong_count": 0, "available_count": 0},
-        "intraday": {},
-    }
-
-    if qqq_df is not None and not qqq_df.empty:
-        qqq_close = float(qqq_df.iloc[-1]["close"])
-        ma20 = float(qqq_df["close"].tail(20).mean()) if len(qqq_df) >= 20 else qqq_close
-        ma50 = float(qqq_df["close"].tail(50).mean()) if len(qqq_df) >= 50 else qqq_close
-        ma200 = float(qqq_df["close"].tail(200).mean()) if len(qqq_df) >= 200 else qqq_close
-        prior_close = float(qqq_df.iloc[-2]["close"]) if len(qqq_df) >= 2 else qqq_close
-        snapshot["qqq"] = {
-            "price": round(qqq_close, 2),
-            "ma20": round(ma20, 2),
-            "ma50": round(ma50, 2),
-            "ma200": round(ma200, 2),
-            "atr14": round(max(qqq_close * 0.02, 1.0), 2),
-            "daily_return": round((qqq_close - prior_close) / prior_close, 4) if prior_close else 0.0,
-            "volume_ratio": 1.0,
-        }
-
-    if (
-        qqq_df is not None
-        and not qqq_df.empty
-        and spy_df is not None
-        and not spy_df.empty
-        and len(qqq_df) >= 2
-        and len(spy_df) >= 2
-    ):
-        qqq_return = (float(qqq_df.iloc[-1]["close"]) - float(qqq_df.iloc[-2]["close"])) / float(qqq_df.iloc[-2]["close"])
-        spy_return = (float(spy_df.iloc[-1]["close"]) - float(spy_df.iloc[-2]["close"])) / float(spy_df.iloc[-2]["close"])
-        snapshot["relative_strength"]["qqq_vs_spy"] = round(qqq_return - spy_return, 4)
-
-    if (
-        qqq_df is not None
-        and not qqq_df.empty
-        and qqqe_df is not None
-        and not qqqe_df.empty
-        and len(qqq_df) >= 2
-        and len(qqqe_df) >= 2
-    ):
-        qqqe_return = (float(qqqe_df.iloc[-1]["close"]) - float(qqqe_df.iloc[-2]["close"])) / float(qqqe_df.iloc[-2]["close"])
-        qqq_return = (float(qqq_df.iloc[-1]["close"]) - float(qqq_df.iloc[-2]["close"])) / float(qqq_df.iloc[-2]["close"])
-        snapshot["relative_strength"]["qqqe_vs_qqq"] = round(qqqe_return - qqq_return, 4)
-
-    tech_symbols = [
-        symbol
-        for symbol in ["NVDA", "MSFT", "AAPL", "AMZN", "META", "GOOGL", "AVGO", "TSLA"]
-        if symbol in historical_slice
-    ]
-    strong_count = 0
-    available_count = 0
-    for symbol in tech_symbols:
-        df = historical_slice.get(symbol)
-        if df is None or df.empty or len(df) < 20:
-            continue
-        available_count += 1
-        if float(df.iloc[-1]["close"]) >= float(df["close"].tail(20).mean()):
-            strong_count += 1
-
-    if available_count > 0:
-        if strong_count / available_count >= 0.6:
-            status = "strong"
-        elif strong_count == 0:
-            status = "weak"
-        else:
-            status = "mixed"
-        snapshot["mega_cap_tech"] = {
-            "status": status,
-            "strong_count": strong_count,
-            "available_count": available_count,
-        }
-
-    return snapshot
+    return build_scoring_snapshot(
+        {
+            "daily_data": historical_slice,
+            "intraday_data": {},
+            "cache_status": _build_backtest_cache_status(historical_slice),
+        },
+        current_date=current_date,
+        mode="backtest",
+    )
 
 
 def _resolve_execution_mode(execution_mode: str) -> str:
@@ -196,12 +131,24 @@ def generate_score_history(
         if len(historical_slice.get("QQQ", pd.DataFrame())) < MIN_HISTORY_DAYS:
             continue
 
-        indicator_snapshot = _build_indicator_snapshot(historical_slice)
+        cache_status = _build_backtest_cache_status(historical_slice)
+        indicator_snapshot = build_scoring_snapshot(
+            {
+                "daily_data": historical_slice,
+                "intraday_data": {},
+                "cache_status": cache_status,
+            },
+            current_date=current_date,
+            mode="backtest",
+        )
         tqqq_result = calculate_tqqq_score(indicator_snapshot)
         sqqq_result = calculate_sqqq_score(indicator_snapshot)
-        risk_result = get_risk_deduction(str(pd.to_datetime(current_date).date()), indicator_snapshot)
-        cache_status = _build_backtest_cache_status(historical_slice)
-        data_quality = assess_data_quality(historical_slice, cache_status)
+        risk_result = get_risk_deduction(
+            str(pd.to_datetime(current_date).date()),
+            indicator_snapshot,
+            event_risk_snapshot=indicator_snapshot.get("event_risk_snapshot"),
+        )
+        data_quality = indicator_snapshot.get("data_quality", assess_data_quality(historical_slice, cache_status))
 
         tqqq_base = float(tqqq_result.get("base_score", 0) or 0)
         sqqq_base = float(sqqq_result.get("base_score", 0) or 0)

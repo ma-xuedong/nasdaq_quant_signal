@@ -18,6 +18,7 @@ from src.backtest import (
     simulate_trades,
 )
 from src.database import init_backtest_tables, load_backtest_trades, save_backtest_trades
+from src.snapshot_builder import build_scoring_snapshot
 
 
 def _price_frame(symbol: str, start: str = "2025-01-01", periods: int = 210, slope: float = 1.0) -> pd.DataFrame:
@@ -52,29 +53,33 @@ def _historical_data() -> dict[str, pd.DataFrame]:
 
 
 def test_generate_score_history_avoids_future_data() -> None:
-    observed_max_dates: list[pd.Timestamp] = []
+    observed_reference_dates: list[pd.Timestamp] = []
 
-    def fake_snapshot(historical_slice: dict[str, pd.DataFrame]) -> dict:
-        observed_max_dates.append(historical_slice["QQQ"]["date"].max())
-        return {
-            "qqq": {"price": 100, "ma20": 99, "ma50": 98, "ma200": 97, "atr14": 2, "daily_return": 0.01, "volume_ratio": 1.0},
-            "relative_strength": {"qqq_vs_spy": 0.02, "qqqe_vs_qqq": 0.01},
-            "mega_cap_tech": {"status": "strong", "strong_count": 4, "available_count": 4},
-            "intraday": {},
-        }
+    def fake_build_snapshot(market_data: dict, current_date=None, mode: str = "backtest") -> dict:
+        del mode
+        qqq_df = market_data["daily_data"]["QQQ"]
+        observed_reference_dates.append(qqq_df["date"].max())
+        return build_scoring_snapshot(market_data, current_date=current_date, mode="backtest")
 
-    with patch("src.backtest._build_indicator_snapshot", side_effect=fake_snapshot), patch(
-        "src.backtest.calculate_tqqq_score", return_value={"base_score": 80}
-    ), patch("src.backtest.calculate_sqqq_score", return_value={"base_score": 40}), patch(
-        "src.backtest.get_risk_deduction", return_value={"deduction": 5, "events": []}
-    ), patch(
-        "src.backtest.assess_data_quality", return_value={"quality_level": "high", "quality_score": 90}
-    ):
+    with patch("src.backtest.build_scoring_snapshot", side_effect=fake_build_snapshot):
         score_df = generate_score_history(_historical_data())
 
     assert not score_df.empty
-    for score_date, observed in zip(score_df["date"], observed_max_dates):
+    for score_date, observed in zip(score_df["date"], observed_reference_dates):
         assert observed <= score_date
+
+
+def test_backtest_snapshot_contains_scoring_required_fields() -> None:
+    snapshot = build_scoring_snapshot(
+        {"daily_data": _historical_data(), "intraday_data": {}},
+        current_date=pd.Timestamp("2025-07-20"),
+        mode="backtest",
+    )
+
+    for field in ["ma20_slope", "ma50_slope", "atr14"]:
+        assert field in snapshot["qqq"]
+    for field in ["up_count", "down_count", "strong_count", "available_count"]:
+        assert field in snapshot["mega_cap_tech"]
 
 
 def test_generate_trade_signals_includes_quality_level() -> None:
@@ -260,6 +265,7 @@ def test_backtest_trade_storage_migrates_legacy_table() -> None:
 
 def main() -> None:
     test_generate_score_history_avoids_future_data()
+    test_backtest_snapshot_contains_scoring_required_fields()
     test_generate_trade_signals_includes_quality_level()
     test_simulate_trades_uses_next_open_and_next_close()
     test_simulate_trades_distinguishes_tqqq_and_sqqq()

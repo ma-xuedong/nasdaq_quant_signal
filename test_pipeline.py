@@ -5,6 +5,8 @@ from unittest.mock import patch
 import pandas as pd
 
 from src.pipeline import run_signal_pipeline
+from src.scoring import calculate_sqqq_score, calculate_tqqq_score
+from src.snapshot_builder import build_scoring_snapshot
 
 
 def _sample_daily(symbol: str = "QQQ") -> pd.DataFrame:
@@ -75,6 +77,68 @@ def test_pipeline_success() -> None:
         "warnings",
     ]:
         assert key in result
+
+
+def test_pipeline_snapshot_contains_unified_scoring_fields() -> None:
+    market_data = {
+        "daily_data": {
+            "QQQ": _sample_daily("QQQ"),
+            "SPY": _sample_daily("SPY"),
+            "QQQE": _sample_daily("QQQE"),
+            "TQQQ": _sample_daily("TQQQ"),
+            "SQQQ": _sample_daily("SQQQ"),
+            "NQ=F": _sample_daily("NQ=F"),
+            "ES=F": _sample_daily("ES=F"),
+            "NVDA": _sample_daily("NVDA"),
+            "MSFT": _sample_daily("MSFT"),
+            "AAPL": _sample_daily("AAPL"),
+            "AMZN": _sample_daily("AMZN"),
+            "META": _sample_daily("META"),
+            "GOOGL": _sample_daily("GOOGL"),
+            "AVGO": _sample_daily("AVGO"),
+            "TSLA": _sample_daily("TSLA"),
+        },
+        "intraday_data": {"QQQ": _sample_intraday("QQQ")},
+    }
+
+    snapshot = build_scoring_snapshot(market_data, current_date=pd.Timestamp("2025-09-17"), mode="live")
+
+    assert "ma20_slope" in snapshot["qqq"]
+    assert "ma50_slope" in snapshot["qqq"]
+    assert "up_count" in snapshot["mega_cap_tech"]
+    assert "down_count" in snapshot["mega_cap_tech"]
+    assert "strong_count" in snapshot["mega_cap_tech"]
+    assert "available_count" in snapshot["mega_cap_tech"]
+
+
+def test_pipeline_and_backtest_like_snapshot_scores_match_on_same_data() -> None:
+    market_data = {
+        "daily_data": {
+            "QQQ": _sample_daily("QQQ"),
+            "SPY": _sample_daily("SPY"),
+            "QQQE": _sample_daily("QQQE"),
+            "TQQQ": _sample_daily("TQQQ"),
+            "SQQQ": _sample_daily("SQQQ"),
+            "NQ=F": _sample_daily("NQ=F"),
+            "ES=F": _sample_daily("ES=F"),
+            "NVDA": _sample_daily("NVDA"),
+            "MSFT": _sample_daily("MSFT"),
+            "AAPL": _sample_daily("AAPL"),
+            "AMZN": _sample_daily("AMZN"),
+            "META": _sample_daily("META"),
+            "GOOGL": _sample_daily("GOOGL"),
+            "AVGO": _sample_daily("AVGO"),
+            "TSLA": _sample_daily("TSLA"),
+        },
+        "intraday_data": {"QQQ": _sample_intraday("QQQ")},
+    }
+    current_date = pd.Timestamp("2025-09-17")
+
+    live_snapshot = build_scoring_snapshot(market_data, current_date=current_date, mode="live")
+    backtest_snapshot = build_scoring_snapshot(market_data, current_date=current_date, mode="backtest")
+
+    assert calculate_tqqq_score(live_snapshot)["base_score"] == calculate_tqqq_score(backtest_snapshot)["base_score"]
+    assert calculate_sqqq_score(live_snapshot)["base_score"] == calculate_sqqq_score(backtest_snapshot)["base_score"]
 
 
 def test_pipeline_fallback_cache_degrades_signal() -> None:
@@ -162,6 +226,8 @@ def test_pipeline_mock_mode_blocks_real_signal() -> None:
 
 def main() -> None:
     test_pipeline_success()
+    test_pipeline_snapshot_contains_unified_scoring_fields()
+    test_pipeline_and_backtest_like_snapshot_scores_match_on_same_data()
     test_pipeline_fallback_cache_degrades_signal()
     test_pipeline_futures_and_breadth_degrade_without_crash()
     test_pipeline_fail_when_qqq_missing()
